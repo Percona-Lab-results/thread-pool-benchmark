@@ -17,7 +17,7 @@
 #   --warmup=<seconds>   - (Optional) Read-write warmup time in seconds (default: 600)
 #   --duration=<seconds> - (Optional) Benchmark duration in seconds (default: 900)
 #   --thread-list=<list> - (Optional) Comma-separated sysbench thread counts
-#                          (default: 1,4,16,32,64,128,256,512,1024)
+#                          (default: 40,80,120,160,320,640,1280,2560)
 #   --pool-size-list=<list> - (Optional) Comma-separated buffer pool sizes in GB
 #                          (default: 2,12,32)
 #   --cpu-freq=<MHz>     - (Optional) CPU frequency in MHz to pin all cores to (default: 2400)
@@ -261,6 +261,11 @@ stop_server() {
       if kill -0 "$pid" 2>/dev/null; then
         echo "Force killing mysqld (PID: $pid)"
         kill -9 "$pid" 2>/dev/null
+        # Wait until the process is actually gone
+        while kill -0 "$pid" 2>/dev/null; do
+          echo "Waiting for mysqld (PID: $pid) to terminate..."
+          sleep 1
+        done
       fi
     fi
     rm -f "$PID_FILE"
