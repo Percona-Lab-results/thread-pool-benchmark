@@ -3,7 +3,8 @@
 #
 # Usage: ./run_metrics.sh --server-dir=<path>
 #                         [--table-rows=<n>[K|M]] [--warmup=<seconds>] [--duration=<seconds>]
-#                         [--thread-list=<n,n,...>] [--pool-size-list=<n,n,...>] [--cpu-freq=<MHz>]
+#                         [--thread-list=<n,n,...>] [--pool-size-list=<n,n,...>]
+#                         [--thread-pool-size-list=<off|n,...>] [--cpu-freq=<MHz>]
 #                         [--runs=<n>] [--run-start=<n>] [--datadir=<path>]
 #
 # Arguments:
@@ -20,6 +21,10 @@
 #                          (default: 40,80,120,160,320,640,1280,2560)
 #   --pool-size-list=<list> - (Optional) Comma-separated buffer pool sizes in GB
 #                          (default: 2,12,32)
+#   --thread-pool-size-list=<list> - (Optional) Comma-separated thread pool sizes to sweep;
+#                          "off" disables the thread pool (thread_handling set to
+#                          one-thread-per-connection). Each numeric size is combined with
+#                          thread_pool_oversubscribe 2,3,4 (default: off,40,80,120,160)
 #   --cpu-freq=<MHz>     - (Optional) CPU frequency in MHz to pin all cores to (default: 2400)
 #   --runs=<n>           - (Optional) Number of runs per iteration (default: 1)
 #   --run-start=<n>      - (Optional) Start run number (default: 1); each run prepends
@@ -27,7 +32,8 @@
 #   --datadir=<path>     - (Optional) Base directory for MySQL data directories; must be
 #                          on NVMe storage (default: /home/bogdan.degtyariov/servers/data)
 #
-# Thread pool sweep (per buffer pool tier, when the server supports a thread pool):
+# Thread pool sweep (per buffer pool tier, when the server supports a thread pool),
+# overridden by --thread-pool-size-list:
 #   - disabled (thread_handling = one-thread-per-connection)
 #   - thread_pool_size in {40, 80, 120, 160}, each with thread_pool_oversubscribe in {2, 3, 4}
 #
@@ -53,8 +59,9 @@ POOL_SIZES=(2 12 32)
 # Sysbench thread counts, overridden by --thread-list
 THREADS=(40 80 120 160 320 640 1280 2560)
 
-# Thread pool sweep values (thread_pool_size x thread_pool_oversubscribe)
-TP_SIZES=(40 80 120 160)
+# Thread pool sweep values, overridden by --thread-pool-size-list;
+# "off" = thread pool disabled, numeric sizes are combined with each oversubscribe value
+TP_SIZES=(off 40 80 120 160)
 TP_OVERSUBS=(2 3 4)
 
 # --- DEBUG SETTINGS ---
@@ -67,7 +74,8 @@ DURATION=900
 usage() {
     echo "Usage: $0 --server-dir=<path>" >&2
     echo "          [--table-rows=<n>[K|M]] [--warmup=<seconds>] [--duration=<seconds>]" >&2
-    echo "          [--thread-list=<n,n,...>] [--pool-size-list=<n,n,...>] [--cpu-freq=<MHz>]" >&2
+    echo "          [--thread-list=<n,n,...>] [--pool-size-list=<n,n,...>]" >&2
+    echo "          [--thread-pool-size-list=<off|n,...>] [--cpu-freq=<MHz>]" >&2
     echo "          [--runs=<n>] [--run-start=<n>] [--datadir=<path>]" >&2
     exit 1
 }
@@ -92,6 +100,16 @@ parse_uint() {
         echo "$1"
     else
         echo "ERROR: Invalid ${2:-number}: $1" >&2
+        exit 1
+    fi
+}
+
+# Comma-separated list of integers or "off", e.g. off,40,80 -> "off 40 80"
+parse_tp_list() {
+    if [[ "$1" =~ ^(off|[0-9]+)(,(off|[0-9]+))*$ ]]; then
+        echo "${1//,/ }"
+    else
+        echo "ERROR: Invalid thread pool size list: $1 (expected comma-separated integers or \"off\", e.g. off,40,80)" >&2
         exit 1
     fi
 }
@@ -123,6 +141,7 @@ for arg in "$@"; do
         --run-start=*)   RUN_START=$(parse_uint "${arg#*=}" "start run number") || exit 1 ;;
         --thread-list=*)    LIST=$(parse_int_list "${arg#*=}") || exit 1; THREADS=($LIST) ;;
         --pool-size-list=*) LIST=$(parse_int_list "${arg#*=}") || exit 1; POOL_SIZES=($LIST) ;;
+        --thread-pool-size-list=*) LIST=$(parse_tp_list "${arg#*=}") || exit 1; TP_SIZES=($LIST) ;;
         -h|--help)       usage ;;
         *) echo "ERROR: Unknown argument: $arg" >&2; usage ;;
     esac
@@ -170,15 +189,23 @@ elif [[ "${DBMS_NAME,,}" == mysql ]] && \
     TP_SUPPORTED="1"
 fi
 
-TP_CONFIGS=("off")
-if [ "$TP_SUPPORTED" == "1" ]; then
-    for TP_SIZE in "${TP_SIZES[@]}"; do
+TP_CONFIGS=()
+for TP_SIZE in "${TP_SIZES[@]}"; do
+    if [ "$TP_SIZE" == "off" ]; then
+        TP_CONFIGS+=("off")
+    elif [ "$TP_SUPPORTED" == "1" ]; then
         for TP_OVERSUB in "${TP_OVERSUBS[@]}"; do
             TP_CONFIGS+=("${TP_SIZE}x${TP_OVERSUB}")
         done
-    done
-else
-    echo "WARNING: thread pool not supported by ${DBMS_NAME} ${DBMS_VER}; running only the disabled configuration" >&2
+    else
+        echo "WARNING: thread pool not supported by ${DBMS_NAME} ${DBMS_VER}; skipping thread_pool_size=${TP_SIZE}" >&2
+    fi
+done
+
+if [ "${#TP_CONFIGS[@]}" -eq 0 ]; then
+    echo "ERROR: no runnable thread pool configurations (all requested sizes require a thread pool," >&2
+    echo "       which is not supported by ${DBMS_NAME} ${DBMS_VER}); add \"off\" to --thread-pool-size-list" >&2
+    exit 1
 fi
 
 # "off" -> "tpoff", "40x2" -> "tp40_os2" (thread_pool_size 40, oversubscribe 2);
