@@ -476,7 +476,7 @@ generate_config() {
     echo "" >> "$CFG"
 
     echo "# --- Connection & Threading ----------------------------------------------------" >> "$CFG"
-    echo "max_connections                 = 2000" >> "$CFG"
+    echo "max_connections                 = 20000" >> "$CFG"
     echo "max_connect_errors              = 1000000" >> "$CFG"
     echo "max_prepared_stmt_count         = 1000000" >> "$CFG"
     echo "thread_stack                    = 512K" >> "$CFG"

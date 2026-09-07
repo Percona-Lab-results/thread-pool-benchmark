@@ -25,6 +25,7 @@ echo "Killing leftover benchmark processes (if any)..."
 sudo killall -q mysqld sysbench iostat vmstat mpstat dstat pt-pmp 2>/dev/null
 sudo pkill -f 'collect_lru_metrics\.sh' 2>/dev/null
 sudo pkill -f 'collect_mutex_metrics\.sh' 2>/dev/null
+ulimit -n 65536
 
 # Give mysqld a chance to shut down gracefully (SIGTERM), force kill after 60s
 WAITED=0
