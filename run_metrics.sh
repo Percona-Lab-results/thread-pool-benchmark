@@ -49,6 +49,7 @@ DB_USER="root"
 DB_PASS="password"
 DB_DATABASE="sbtest"
 DB_PORT="3306"
+DB_SOCKET="/tmp/mysql_benchmark.sock"
 
 # Server locations, overridden by --datadir
 DATADIR_BASE="/home/bogdan.degtyariov/servers/data"
@@ -381,7 +382,7 @@ mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_PATH" << EOF
 [mysqld]
 port=$DB_PORT
-socket=/tmp/mysql_benchmark.sock
+socket=$DB_SOCKET
 datadir=$TMP_DATADIR
 EOF
 
@@ -389,10 +390,10 @@ start_server "$TMP_DATADIR" "$CONFIG_PATH"
 server_wait
 
 # Set root password and grant TCP/IP access (use socket for initial connection)
-"$MYSQLADMIN" --socket=/tmp/mysql_benchmark.sock -u"$DB_USER" password "$DB_PASS" 2>/dev/null
+"$MYSQLADMIN" --socket="$DB_SOCKET" -u"$DB_USER" password "$DB_PASS" 2>/dev/null
 
 # Grant access from 127.0.0.1
-"$MYSQL_CLIENT" --socket=/tmp/mysql_benchmark.sock -u"$DB_USER" -p"$DB_PASS" -e "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$DB_PASS'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null
+"$MYSQL_CLIENT" --socket="$DB_SOCKET" -u"$DB_USER" -p"$DB_PASS" -e "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$DB_PASS'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null
 
 RAW_VERSION=$("$MYSQL_CLIENT" -h $DB_HOST --port=$DB_PORT -u $DB_USER -p$DB_PASS -N -e "SELECT VERSION();" 2>/dev/null)
 MAJOR_VER=$(echo $RAW_VERSION | cut -d'.' -f1,2)
@@ -463,7 +464,7 @@ generate_config() {
     # 1. Start Base Config
     echo "[mysqld]" > "$CFG"
     echo "port                            = $DB_PORT" >> "$CFG"
-    echo "socket                          = /tmp/mysql_benchmark.sock" >> "$CFG"
+    echo "socket                          = $DB_SOCKET" >> "$CFG"
     echo "datadir                         = $DATADIR" >> "$CFG"
     echo "log_error_verbosity             = 3" >> "$CFG"
     echo "log_error                       = ${DATADIR}/mysql-error.log" >> "$CFG"
@@ -819,7 +820,7 @@ trap 'stop_metrics; stop_server; exit 1' INT TERM
 
 init_data() {
   echo ">>> Create tables and insert data..."
-  sysbench oltp_read_only --mysql-host=$DB_HOST --mysql-port=$DB_PORT --mysql-user=$DB_USER --mysql-password=$DB_PASS \
+  sysbench oltp_read_only --mysql-socket=$DB_SOCKET --mysql-user=$DB_USER --mysql-password=$DB_PASS \
     --mysql-db=$DB_DATABASE --tables=20 --table-size=$TABLE_ROWS --threads=64 prepare
 }
 
@@ -850,10 +851,10 @@ for SIZE in "${POOL_SIZES[@]}"; do
 
     if [ "$TIER_DATA_LOADED" != "1" ]; then
       # Set root password and grant TCP/IP access (use socket for initial connection after fresh init)
-      "$MYSQLADMIN" --socket=/tmp/mysql_benchmark.sock -u"$DB_USER" password "$DB_PASS" 2>/dev/null
+      "$MYSQLADMIN" --socket="$DB_SOCKET" -u"$DB_USER" password "$DB_PASS" 2>/dev/null
 
       # Grant access from 127.0.0.1
-      "$MYSQL_CLIENT" --socket=/tmp/mysql_benchmark.sock -u"$DB_USER" -p"$DB_PASS" -e "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$DB_PASS'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null
+      "$MYSQL_CLIENT" --socket="$DB_SOCKET" -u"$DB_USER" -p"$DB_PASS" -e "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '$DB_PASS'; GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" 2>/dev/null
 
       # Create database
       "$MYSQL_CLIENT" -h "$DB_HOST" --port=$DB_PORT -u "$DB_USER" -p"$DB_PASS" -e "CREATE DATABASE IF NOT EXISTS ${DB_DATABASE};" 2>/dev/null
@@ -873,7 +874,7 @@ for SIZE in "${POOL_SIZES[@]}"; do
 
     # 3. WARMUP
     echo ">>> Warmup: Dirty Writes (${WARMUP_TIME}s)..."
-    sysbench oltp_read_write --mysql-host=$DB_HOST --mysql-port=$DB_PORT --mysql-user=$DB_USER --mysql-password=$DB_PASS \
+    sysbench oltp_read_write --mysql-socket=$DB_SOCKET --mysql-user=$DB_USER --mysql-password=$DB_PASS \
         --mysql-db=$DB_DATABASE --tables=20 --table-size=$TABLE_ROWS --threads=64 --time=$WARMUP_TIME run
     TEST_TYPE="oltp_read_write"
 
@@ -887,8 +888,7 @@ for SIZE in "${POOL_SIZES[@]}"; do
         start_metrics "$FILE_PREFIX"
 
         sysbench $TEST_TYPE \
-          --mysql-host=$DB_HOST \
-          --mysql-port=$DB_PORT \
+          --mysql-socket=$DB_SOCKET \
           --mysql-user=$DB_USER \
           --mysql-password=$DB_PASS \
           --mysql-db=$DB_DATABASE \
