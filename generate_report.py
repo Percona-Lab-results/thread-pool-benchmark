@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Scans benchmark_logs/<server>/<version>/ for run<R>_Tier<M>G_RW_<T>th.sysbench.txt
-files, parses TPS/QPS, and generates a self-contained interactive Plotly HTML
-report. The HTML template is embedded in this script; no external files needed.
+Scans benchmark_logs/<server>/<version>/ for
+run<R>_<ROWS>_Tier<M>G_(tpoff|tp<S>_os<O>)_RW_<T>th.sysbench.txt files,
+parses TPS/QPS, and generates a self-contained interactive Plotly HTML report.
+The HTML template is embedded in this script; no external files needed.
+
+Files with "tpoff" in the name are runs with the thread pool disabled
+(thread_handling = one-thread-per-connection). The report provides
+multi-select controls for buffer pool size (Tier), thread pool size and
+oversubscribe.
 
 The report embeds all individual run results; a switch on the page toggles
 between averaged runs (default) and individual runs.
@@ -20,9 +26,9 @@ from collections import Counter
 from html import escape
 from pathlib import Path
 
-# Matches run<N>_<ROWS>_Tier<M>G_RW_<T>th and the older run<N>_Tier<M>G_RW_<T>th
 FILENAME_RE = re.compile(
-    r"^run(?P<run>\d+)_(?:(?P<rows>\d+[KkMm]?)_)?Tier(?P<mem>\d+)G_RW_(?P<threads>\d+)th\.sysbench\.txt$"
+    r"^run(?P<run>\d+)_(?P<rows>\d+[KkMm]?)_Tier(?P<mem>\d+)G_"
+    r"(?:tpoff|tp(?P<tp>\d+)_os(?P<os>\d+))_RW_(?P<threads>\d+)th\.sysbench\.txt$"
 )
 TPS_RE = re.compile(r"transactions:\s*\d+\s*\(([0-9.]+)\s*per sec\.\)")
 QPS_RE = re.compile(r"queries:\s*\d+\s*\(([0-9.]+)\s*per sec\.\)")
@@ -60,39 +66,26 @@ def iter_sysbench_files(base_dir: Path):
 
 def scan_runs(base_dir: Path):
     """One entry per individual run; averaging happens client-side in the report."""
-    # The same run can exist under both its old-style name (no rows token,
-    # meaning the 5M default) and its renamed new-style one; keep a single
-    # entry per logical run, preferring the file with the explicit rows token.
-    entries = {}
+    rows = []
+    durations = []
     for server, version, m, (tps, qps, duration) in iter_sysbench_files(base_dir):
-        explicit_rows = m.group("rows") is not None
-        key = (server, version, int(m.group("run")),
-               m.group("rows") or "5M", int(m.group("mem")), int(m.group("threads")))
-        prev = entries.get(key)
-        if prev is not None:
-            old_name = m.string if prev["explicit_rows"] else prev["row"]["file"] + ".sysbench.txt"
-            print(f"  duplicate run (old-style name ignored): {server}/{version}/{old_name}",
-                  file=sys.stderr)
-            if prev["explicit_rows"]:
-                continue
-        entries[key] = {
-            "explicit_rows": explicit_rows,
-            "duration": duration,
-            "row": {
-                "server": f"{server} {version}",
-                "run": int(m.group("run")),
-                # Old-style file names carry no rows token; those runs used the 5M default
-                "rows": m.group("rows") or "5M",
-                "file": m.string[: -len(".sysbench.txt")],
-                "mem_gb": int(m.group("mem")),
-                "threads": int(m.group("threads")),
-                "tps": round(tps, 2),
-                "qps": round(qps, 2),
-            },
-        }
-    rows = [e["row"] for e in entries.values()]
-    durations = [e["duration"] for e in entries.values() if e["duration"]]
-    rows.sort(key=lambda r: (r["server"], r["run"], r["rows"], r["mem_gb"], r["threads"]))
+        if duration:
+            durations.append(duration)
+        rows.append({
+            "server": f"{server} {version}",
+            "run": int(m.group("run")),
+            "rows": m.group("rows"),
+            "file": m.string[: -len(".sysbench.txt")],
+            "mem_gb": int(m.group("mem")),
+            # tp: "off" when the thread pool is disabled, else thread_pool_size
+            "tp": "off" if m.group("tp") is None else int(m.group("tp")),
+            "os": None if m.group("os") is None else int(m.group("os")),
+            "threads": int(m.group("threads")),
+            "tps": round(tps, 2),
+            "qps": round(qps, 2),
+        })
+    rows.sort(key=lambda r: (r["server"], r["run"], r["mem_gb"],
+                             str(r["tp"]), r["os"] or 0, r["threads"]))
     return rows, durations
 
 
@@ -148,36 +141,34 @@ def table_rows(pairs):
     return "\n              ".join(out)
 
 
-def rows_sort_key(label):
-    """Order rows labels by their numeric value: 500K < 5M < 10M."""
-    m = re.match(r"^(\d+)([KkMm]?)$", label)
-    if not m:
-        return (float("inf"), label)
-    mult = {"": 1, "k": 1000, "m": 1000000}[m.group(2).lower()]
-    return (int(m.group(1)) * mult, label)
+def tp_sort_key(tp):
+    """Order thread pool sizes with 'off' first, then numerically."""
+    return (0, 0) if tp == "off" else (1, tp)
 
 
 def build_data_block(rows):
     servers_sorted = sorted({r["server"] for r in rows})
     mems_sorted = sorted({r["mem_gb"] for r in rows})
     threads_sorted = sorted({r["threads"] for r in rows})
-    rows_values = sorted({r["rows"] for r in rows}, key=rows_sort_key)
+    tps_sorted = sorted({r["tp"] for r in rows}, key=tp_sort_key)
+    os_sorted = sorted({r["os"] for r in rows if r["os"] is not None})
 
     block = (
         f"const RUNS = {json.dumps(rows)};\n"
         f"const MEMS = {json.dumps(mems_sorted)};\n"
         f"const THREADS = {json.dumps(threads_sorted)};\n"
-        f"const ROWS_VALUES = {json.dumps(rows_values)};"
+        f"const TP_SIZES = {json.dumps(tps_sorted)};\n"
+        f"const OS_VALUES = {json.dumps(os_sorted)};"
     )
-    return block, servers_sorted, mems_sorted, threads_sorted, rows_values
+    return block, servers_sorted, mems_sorted, threads_sorted, tps_sorted, os_sorted
 
 
-TEMPLATE = """<!doctype html>
+TEMPLATE = r"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Sysbench Interactive Comparison</title>
+  <title>Sysbench Thread Pool Comparison</title>
   <script>
     function loadPlotly(cb) {
       var s = document.createElement('script');
@@ -201,7 +192,8 @@ TEMPLATE = """<!doctype html>
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; }
     label { display:block; font-weight: 600; margin: 10px 0 6px; }
     select { width: 100%; padding: 8px; border-radius: 10px; border: 1px solid #ccc; }
-    select[multiple] { height: 300px; }
+    select[multiple] { height: 120px; }
+    #serverSel { height: 80px; }
     .hint { color: #555; font-size: 12px; line-height: 1.4; margin-top: 8px; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .btnrow { display:flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
@@ -273,7 +265,7 @@ TEMPLATE = """<!doctype html>
   </style>
 </head>
 <body>
-  <h2>Sysbench Performance &mdash; Interactive Comparison</h2>
+  <h2>Sysbench Thread Pool Performance &mdash; Interactive Comparison</h2>
   <div class="wrap">
     <div class="card">
       <label for="serverSel">Servers (multi-select)</label>
@@ -282,14 +274,18 @@ TEMPLATE = """<!doctype html>
 
       <div class="row">
         <div>
-          <label for="memSel">Memory (multi-select)</label>
+          <label for="memSel">Buffer pool (multi-select)</label>
           <select id="memSel" multiple></select>
         </div>
         <div>
-          <label for="rowsSel">Table rows (multi-select)</label>
-          <select id="rowsSel" multiple></select>
+          <label for="tpSel">Thread pool size (multi-select)</label>
+          <select id="tpSel" multiple></select>
         </div>
       </div>
+
+      <label for="osSel">Oversubscribe (multi-select)</label>
+      <select id="osSel" multiple></select>
+      <div class="hint">"off" runs (thread pool disabled) are unaffected by the oversubscribe selection.</div>
 
       <label>Runs</label>
       <div style="display: flex; gap: 16px;">
@@ -312,16 +308,20 @@ TEMPLATE = """<!doctype html>
       </div>
 
       <div class="btnrow">
-        <button id="allServersBtn">Select all servers</button>
-        <button id="allMemsBtn">Select all memory</button>
-        <button id="allRowsBtn">Select all rows</button>
+        <button id="allServersBtn">All servers</button>
+        <button id="allMemsBtn">All buffer pools</button>
+        <button id="allTpsBtn">All TP sizes</button>
+        <button id="allOsBtn">All oversubscribe</button>
         <button id="resetBtn">Reset</button>
       </div>
 
       <div class="hint">
-        Chart overlays selected servers at selected memory values. Missing points are omitted automatically.
+        Chart overlays selected servers at the selected buffer pool / thread pool
+        combinations. Missing points are omitted automatically.
         Click a data point to download its log files.
-        Shareable URL parameters: <code>?display=graph|table&amp;mem=4,32</code> (or <code>mem=all</code>).
+        Shareable URL parameters:
+        <code>?display=graph|table&amp;mem=2,32&amp;tp=off,80&amp;os=2,3</code>
+        (or <code>mem=all</code>, <code>tp=all</code>, <code>os=all</code>).
       </div>
     </div>
 
@@ -408,6 +408,15 @@ function numeric(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Select option values are strings; thread pool sizes mix "off" and numbers.
+function tpValue(v) {
+  return v === "off" ? "off" : Number(v);
+}
+
+function tpLabel(tp, os) {
+  return tp === "off" ? "TP off" : `TP ${tp} os${os}`;
+}
+
 const DEFAULT_MEM = MEMS.includes(12) ? 12 : MEMS[0];
 
 let VIEW_MODE = "average";
@@ -417,17 +426,19 @@ function computeData() {
   if (VIEW_MODE === "individual") {
     return RUNS.map(r => ({
       server: `run${r.run}-${r.server.replace(/ /g, "-")}`,
-      rows: r.rows, mem_gb: r.mem_gb, threads: r.threads, tps: r.tps, qps: r.qps,
+      rows: r.rows, mem_gb: r.mem_gb, tp: r.tp, os: r.os,
+      threads: r.threads, tps: r.tps, qps: r.qps,
       file: r.file,
     }));
   }
-  // Average all runs per (server, rows, mem, threads)
+  // Average all runs per (server, mem, tp, os, threads)
   const groups = new Map();
   RUNS.forEach(r => {
-    const key = `${r.server}|${r.rows}|${r.mem_gb}|${r.threads}`;
+    const key = `${r.server}|${r.mem_gb}|${r.tp}|${r.os}|${r.threads}`;
     let g = groups.get(key);
     if (!g) {
-      g = {server: r.server, rows: r.rows, mem_gb: r.mem_gb, threads: r.threads, tps: [], qps: []};
+      g = {server: r.server, rows: r.rows, mem_gb: r.mem_gb, tp: r.tp, os: r.os,
+           threads: r.threads, tps: [], qps: []};
       groups.set(key, g);
     }
     g.tps.push(r.tps);
@@ -435,7 +446,8 @@ function computeData() {
   });
   const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
   return Array.from(groups.values()).map(g => ({
-    server: g.server, rows: g.rows, mem_gb: g.mem_gb, threads: g.threads,
+    server: g.server, rows: g.rows, mem_gb: g.mem_gb, tp: g.tp, os: g.os,
+    threads: g.threads,
     tps: Math.round(mean(g.tps) * 100) / 100,
     qps: Math.round(mean(g.qps) * 100) / 100,
   }));
@@ -447,27 +459,34 @@ function serverList() {
   return [...new Set(DATA.map(r => r.server))].sort();
 }
 
-// Series matching the current selection: one per (server, mem, rows) with data.
-// Shared by the graph and the table views.
+// Series matching the current selection: one per (server, mem, tp[, os]) with
+// data. Shared by the graph and the table views.
 function selectedSeries() {
   const selectedServers = getSelectedValues(el("serverSel"));
   const selectedMems = getSelectedValues(el("memSel")).map(numeric).filter(v => v !== null);
-  const selectedRows = getSelectedValues(el("rowsSel"));
+  const selectedTps = getSelectedValues(el("tpSel")).map(tpValue);
+  const selectedOs = getSelectedValues(el("osSel")).map(numeric).filter(v => v !== null);
 
   const servers = selectedServers.length ? selectedServers : [serverList()[0]];
   const mems = selectedMems.length ? selectedMems : [DEFAULT_MEM];
-  const rowsVals = selectedRows.length ? selectedRows : ROWS_VALUES;
+  const tps = selectedTps.length ? selectedTps : TP_SIZES;
+  const osVals = selectedOs.length ? selectedOs : OS_VALUES;
 
   const series = [];
   servers.forEach(server => {
     mems.forEach(mem => {
-      rowsVals.forEach(rows => {
-        const pts = DATA
-          .filter(r => r.server === server && r.mem_gb === mem && r.rows === rows && r.tps !== null)
-          .sort((a,b)=>a.threads-b.threads);
+      tps.forEach(tp => {
+        // "off" carries no oversubscribe dimension
+        const osList = tp === "off" ? [null] : osVals;
+        osList.forEach(os => {
+          const pts = DATA
+            .filter(r => r.server === server && r.mem_gb === mem &&
+                         r.tp === tp && r.os === os && r.tps !== null)
+            .sort((a,b)=>a.threads-b.threads);
 
-        if (!pts.length) return;
-        series.push({ name: `${server} | ${mem}G | ${rows} rows`, pts });
+          if (!pts.length) return;
+          series.push({ name: `${server} | ${mem}G | ${tpLabel(tp, os)}`, pts });
+        });
       });
     });
   });
@@ -483,12 +502,14 @@ function buildTraces() {
     name: s.name,
     x: s.pts.map(p=>p.threads),
     y: s.pts.map(p=>p[metric]),
-    customdata: s.pts.map(p=>({server: p.server, rows: p.rows, mem_gb: p.mem_gb, threads: p.threads, tps: p.tps, qps: p.qps, file: p.file})),
+    customdata: s.pts.map(p=>({server: p.server, rows: p.rows, mem_gb: p.mem_gb,
+                               tp: p.tp, os: p.os, tpLabel: tpLabel(p.tp, p.os),
+                               threads: p.threads, tps: p.tps, qps: p.qps, file: p.file})),
     marker: { size: 10 },
     hovertemplate:
       '<b>%{customdata.server}</b><br>' +
-      'Rows: %{customdata.rows}<br>' +
-      'Memory: %{customdata.mem_gb}G<br>' +
+      'Buffer pool: %{customdata.mem_gb}G<br>' +
+      'Thread pool: %{customdata.tpLabel}<br>' +
       'Threads: %{customdata.threads}<br>' +
       'TPS: %{customdata.tps:,.0f}<br>' +
       'QPS: %{customdata.qps:,.0f}' +
@@ -496,8 +517,8 @@ function buildTraces() {
   }));
 }
 
-// TPS table: one row per (server, mem, rows) series, one column per thread count.
-// Cells open the same download modal as clicking a graph point.
+// TPS table: one row per (server, mem, tp[, os]) series, one column per thread
+// count. Cells open the same download modal as clicking a graph point.
 function buildTable() {
   const container = el("tableView");
   container.innerHTML = "";
@@ -512,7 +533,7 @@ function buildTable() {
   const headRow = document.createElement("tr");
   const nameTh = document.createElement("th");
   nameTh.className = "name";
-  nameTh.textContent = "Server | Memory | Rows";
+  nameTh.textContent = "Server | Buffer pool | Thread pool";
   headRow.appendChild(nameTh);
   THREADS.forEach(t => {
     const th = document.createElement("th");
@@ -540,7 +561,7 @@ function buildTable() {
         td.title = `TPS: ${p.tps.toLocaleString()}  QPS: ${p.qps.toLocaleString()} (click for log files)`;
         td.addEventListener("click", () => showDownloadModal(p));
       } else {
-        td.textContent = "\\u2014";
+        td.textContent = "—";
       }
       tr.appendChild(td);
     });
@@ -562,11 +583,11 @@ function layoutForMode() {
       ticktext: THREADS.map(String),
     },
     yaxis: { title: yTitle, rangemode: 'tozero' },
+    // Vertical legend to the right of the plot so it never obstructs the lines
     legend: {
-      x: 0.02, y: 0.98,
+      orientation: "v",
+      x: 1.02, y: 1,
       xanchor: "left", yanchor: "top",
-      bgcolor: "rgba(255,255,255,0.75)",
-      bordercolor: "#ddd", borderwidth: 1,
     },
     margin: { l: 70, r: 20, t: 60, b: 60 },
     hovermode: "closest",
@@ -579,18 +600,18 @@ function layoutForMode() {
 
 const BASE_URL = "{{BASE_URL}}";
 const LOG_EXTS = ["sysbench.txt", "iostat.txt", "vmstat.txt", "dstat.txt",
-                  "innodb.txt", "pt-pmp.txt",
+                  "mpstat.txt", "innodb.txt", "mutex_metrics.csv", "pt-pmp.txt",
                   "stat-thpool.txt", "stat-thr.txt"];
-const TIER_EXTS = ["status.txt", "vars.txt", "cnf.txt", "errlog.txt", "pt-mysql-summary.txt"];
+const TIER_EXTS = ["cnf.txt", "vars.txt", "status.txt", "pt-mysql-summary.txt"];
 
 function serverToPath(server) {
-  // Handle formats: "Percona-Server 8.4.10-10", "run2-Percona-Server-8.4.10-10"
-  let cleanServer = server.replace(/^run\\d+-/, '');
+  // Handle formats: "Percona-Server 9.7.1-1", "run2-Percona-Server-9.7.1-1"
+  let cleanServer = server.replace(/^run\d+-/, '');
 
   let idx = cleanServer.indexOf(' ');
   if (idx === -1) {
     // No space: split at the hyphen before the version (starts with digits)
-    const match = cleanServer.match(/^(.+?)-(\\d+\\.\\d+\\..+)$/);
+    const match = cleanServer.match(/^(.+?)-(\d+\.\d+\..+)$/);
     if (match) {
       return match[1] + '/' + match[2];
     }
@@ -614,25 +635,27 @@ function makeListItem(ext, fname, url) {
 function showDownloadModal(d) {
   const server = d.server, mem_gb = d.mem_gb, threads = d.threads, tps = d.tps, qps = d.qps;
   const path = serverToPath(server);
+  // Thread pool token used in file names: "tpoff" or "tp<SIZE>_os<OVERSUB>"
+  const tpToken = d.tp === "off" ? "tpoff" : `tp${d.tp}_os${d.os}`;
 
-  // Extract run number if server name includes it (e.g., "run2-Percona-Server-8.4.10-10")
-  const runMatch = server.match(/^run(\\d+)-/);
+  // Extract run number if server name includes it (e.g., "run2-Percona-Server-9.7.1-1")
+  const runMatch = server.match(/^run(\d+)-/);
   const isIndividualRun = !!runMatch;
   const runNum = runMatch ? runMatch[1] : '1';
 
-  const displayServer = server.replace(/^run\\d+-/, '');
+  const displayServer = server.replace(/^run\d+-/, '');
 
   document.getElementById('dlTitle').textContent = displayServer;
   document.getElementById('dlSubtitle').textContent =
     isIndividualRun
-      ? `Run: ${runNum}  ·  Rows: ${d.rows}  ·  Memory: ${mem_gb}G  ·  Threads: ${threads}  ·  TPS: ${tps.toLocaleString()}  ·  QPS: ${qps.toLocaleString()}`
-      : `Rows: ${d.rows}  ·  Memory: ${mem_gb}G  ·  Threads: ${threads}  ·  Average TPS: ${tps.toLocaleString()}  ·  Average QPS: ${qps.toLocaleString()}`;
+      ? `Run: ${runNum}  ·  Rows: ${d.rows}  ·  Buffer pool: ${mem_gb}G  ·  Thread pool: ${tpLabel(d.tp, d.os)}  ·  Threads: ${threads}  ·  TPS: ${tps.toLocaleString()}  ·  QPS: ${qps.toLocaleString()}`
+      : `Rows: ${d.rows}  ·  Buffer pool: ${mem_gb}G  ·  Thread pool: ${tpLabel(d.tp, d.os)}  ·  Threads: ${threads}  ·  Average TPS: ${tps.toLocaleString()}  ·  Average QPS: ${qps.toLocaleString()}`;
   const list = document.getElementById('dlLinks');
   list.innerHTML = '';
 
   // For individual runs, show run-specific files; for average view, only per-tier files
   if (isIndividualRun) {
-    const fileBase = d.file || `run${runNum}_Tier${mem_gb}G_RW_${threads}th`;
+    const fileBase = d.file || `run${runNum}_${d.rows}_Tier${mem_gb}G_${tpToken}_RW_${threads}th`;
     LOG_EXTS.forEach(ext => {
       const fname = `${fileBase}.${ext}`;
       const url = `${BASE_URL}/${path}/${fname}`;
@@ -642,10 +665,15 @@ function showDownloadModal(d) {
 
   // Per-tier files (always shown)
   TIER_EXTS.forEach(ext => {
-    const fname = ext === "pt-mysql-summary.txt" ? `Tier${mem_gb}G-${ext}` : `Tier${mem_gb}G.${ext}`;
+    const fname = ext === "pt-mysql-summary.txt"
+      ? `Tier${mem_gb}G_${tpToken}-${ext}`
+      : `Tier${mem_gb}G_${tpToken}.${ext}`;
     const url = `${BASE_URL}/${path}/${fname}`;
     list.appendChild(makeListItem(ext, fname, url));
   });
+  // The error log is shared by all thread pool configurations of a tier
+  list.appendChild(makeListItem("errlog.txt", `Tier${mem_gb}G.errlog.txt`,
+                                `${BASE_URL}/${path}/Tier${mem_gb}G.errlog.txt`));
 
   document.getElementById('dlOverlay').classList.add('open');
 }
@@ -666,7 +694,21 @@ function attachPlotlyClick() {
   });
 }
 
-// URL parameters: ?display=graph|table & mem=<tier>[,<tier>...]|all (e.g. ?display=table&mem=4,32)
+// URL parameters, e.g. ?display=table&mem=2,32&tp=off,80&os=2,3
+// (each list also accepts "all")
+function applyListParam(params, name, selectEl, values, normalize) {
+  const raw = params.get(name);
+  if (!raw) return;
+  if (raw.toLowerCase() === "all") {
+    setSelected(selectEl, _ => true);
+    return;
+  }
+  const wanted = new Set(raw.split(",").map(s => normalize(s.trim())));
+  if (values.some(v => wanted.has(String(v)))) {
+    setSelected(selectEl, v => wanted.has(v));
+  }
+}
+
 function applyUrlParams() {
   const params = new URLSearchParams(window.location.search);
 
@@ -677,18 +719,10 @@ function applyUrlParams() {
     if (radio) radio.checked = true;
   }
 
-  const mem = params.get("mem");
-  if (mem) {
-    if (mem.toLowerCase() === "all") {
-      setSelected(el("memSel"), _ => true);
-    } else {
-      // Accept "4" and "4G" alike
-      const wanted = new Set(mem.split(",").map(s => s.trim().replace(/[Gg]$/, "")));
-      if (MEMS.some(m => wanted.has(String(m)))) {
-        setSelected(el("memSel"), v => wanted.has(v));
-      }
-    }
-  }
+  // Accept "4" and "4G" alike for the buffer pool
+  applyListParam(params, "mem", el("memSel"), MEMS, s => s.replace(/[Gg]$/, ""));
+  applyListParam(params, "tp", el("tpSel"), TP_SIZES, s => s.toLowerCase());
+  applyListParam(params, "os", el("osSel"), OS_VALUES, s => s);
 }
 
 function syncUrl() {
@@ -696,6 +730,10 @@ function syncUrl() {
   params.set("display", DISPLAY_MODE);
   const mems = getSelectedValues(el("memSel"));
   params.set("mem", mems.length === MEMS.length ? "all" : mems.join(","));
+  const tps = getSelectedValues(el("tpSel"));
+  params.set("tp", tps.length === TP_SIZES.length ? "all" : tps.join(","));
+  const osVals = getSelectedValues(el("osSel"));
+  params.set("os", osVals.length === OS_VALUES.length ? "all" : osVals.join(","));
   try {
     history.replaceState(null, "", `${window.location.pathname}?${params}`);
   } catch (e) { /* file:// in some browsers forbids replaceState */ }
@@ -722,13 +760,15 @@ function refreshServers() {
 function init() {
   refreshServers();
   fillOptions(el("memSel"), MEMS, (v)=>`${v}G`);
-  fillOptions(el("rowsSel"), ROWS_VALUES);
+  fillOptions(el("tpSel"), TP_SIZES, (v)=>v === "off" ? "off (no thread pool)" : v);
+  fillOptions(el("osSel"), OS_VALUES);
 
-  // Default memory tier and all rows values selected by default
+  // Default buffer pool tier; all thread pool sizes and oversubscribe values
   setSelected(el("memSel"), v => Number(v) === DEFAULT_MEM);
-  setSelected(el("rowsSel"), _ => true);
+  setSelected(el("tpSel"), _ => true);
+  setSelected(el("osSel"), _ => true);
 
-  ["serverSel","memSel","rowsSel"].forEach(id => {
+  ["serverSel","memSel","tpSel","osSel"].forEach(id => {
     el(id).addEventListener("change", render);
   });
 
@@ -750,11 +790,13 @@ function init() {
 
   el("allServersBtn").addEventListener("click", () => { setSelected(el("serverSel"), _ => true); render(); });
   el("allMemsBtn").addEventListener("click", () => { setSelected(el("memSel"), _ => true); render(); });
-  el("allRowsBtn").addEventListener("click", () => { setSelected(el("rowsSel"), _ => true); render(); });
+  el("allTpsBtn").addEventListener("click", () => { setSelected(el("tpSel"), _ => true); render(); });
+  el("allOsBtn").addEventListener("click", () => { setSelected(el("osSel"), _ => true); render(); });
   el("resetBtn").addEventListener("click", () => {
     setSelected(el("serverSel"), _ => true);
     setSelected(el("memSel"), v => Number(v) === DEFAULT_MEM);
-    setSelected(el("rowsSel"), _ => true);
+    setSelected(el("tpSel"), _ => true);
+    setSelected(el("osSel"), _ => true);
     render();
   });
 
@@ -799,12 +841,12 @@ document.addEventListener('keydown', function(e) {
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate an interactive sysbench HTML report from benchmark_logs."
+        description="Generate an interactive sysbench thread pool HTML report from benchmark_logs."
     )
     parser.add_argument("--base-dir", default="benchmark_logs",
                         help="Directory with <server>/<version>/ benchmark logs (default: benchmark_logs)")
-    parser.add_argument("--output", default=None,
-                        help="Output HTML file (default: <base-dir>/../sysbench_interactive_comparison.html)")
+    parser.add_argument("--output", default="benchmark_report.html",
+                        help="Output HTML file (default: benchmark_report.html)")
     parser.add_argument("--test-type", default="OLTP Read-Write",
                         help='Test type label shown in the report (default: "OLTP Read-Write")')
     args = parser.parse_args()
@@ -813,10 +855,7 @@ def main():
     if not base_dir.is_dir():
         sys.exit(f"base_dir not found: {base_dir}")
 
-    output_file = (
-        Path(args.output) if args.output
-        else base_dir.resolve().parent / "sysbench_interactive_comparison.html"
-    )
+    output_file = Path(args.output)
 
     print(f"Scanning: {base_dir}")
 
@@ -824,17 +863,20 @@ def main():
     if not rows:
         sys.exit(f"No valid sysbench data found under '{base_dir}'")
 
-    run_counts = Counter((r["server"], r["rows"], r["mem_gb"], r["threads"]) for r in rows)
+    run_counts = Counter((r["server"], r["mem_gb"], str(r["tp"]), r["os"], r["threads"])
+                         for r in rows)
     max_runs = max(run_counts.values())
-    for (server, rows_label, mem, threads), count in sorted(run_counts.items()):
+    for (server, mem, tp, osub, threads), count in sorted(
+            run_counts.items(), key=lambda kv: [str(x) for x in kv[0]]):
         if count < max_runs:
+            tp_label = "off" if tp == "off" else f"{tp} os{osub}"
             print(
                 f"  warning: only {count}/{max_runs} run(s) for "
-                f"{server} rows={rows_label} mem={mem}G threads={threads}",
+                f"{server} mem={mem}G tp={tp_label} threads={threads}",
                 file=sys.stderr,
             )
 
-    data_block, servers, mems, threads, rows_values = build_data_block(rows)
+    data_block, servers, mems, threads, tp_sizes, os_values = build_data_block(rows)
 
     # System info table from pt-summary output
     sys_info = parse_pt_summary(base_dir)
@@ -842,7 +884,9 @@ def main():
                  for k in PT_SUMMARY_KEYS + ["Memory Total"]]
 
     # Run configuration table
-    config_pairs = [("Test Type", args.test_type), ("Tables", "20")]
+    rows_values = sorted({r["rows"] for r in rows})
+    config_pairs = [("Test Type", args.test_type), ("Tables", "20"),
+                    ("Rows per table", ", ".join(rows_values))]
     if durations:
         common = Counter(round(d) for d in durations).most_common(1)[0][0]
         config_pairs.append(("Test duration", f"{common}s"))
@@ -853,9 +897,12 @@ def main():
     # About table
     about_pairs = [
         ("Servers compared", ", ".join(servers)),
-        ("Memory tiers (innodb_buffer_pool_size)",
+        ("Buffer pool tiers (innodb_buffer_pool_size)",
          ", ".join(f"{m} GB" for m in mems)),
-        ("Table rows variants", ", ".join(rows_values)),
+        ("Thread pool sizes (thread_pool_size)",
+         ", ".join(str(t) for t in tp_sizes)),
+        ("Oversubscribe (thread_pool_oversubscribe)",
+         ", ".join(str(o) for o in os_values)),
         ("Client threads", ", ".join(str(t) for t in threads)),
         ("Metric", "Transactions per second (TPS); QPS shown in hover tooltips"),
     ]
@@ -874,11 +921,12 @@ def main():
     output_file.write_text(out)
 
     print(f"Done. Report written to: {output_file}")
-    print(f"  Servers : {len(servers)}")
-    print(f"  Memories: {', '.join(str(m) for m in mems)}")
-    print(f"  Rows    : {', '.join(rows_values)}")
-    print(f"  Threads : {', '.join(str(t) for t in threads)}")
-    print(f"  Records : {len(rows)} individual runs (up to {max_runs} per configuration)")
+    print(f"  Servers      : {len(servers)}")
+    print(f"  Buffer pools : {', '.join(str(m) for m in mems)}")
+    print(f"  TP sizes     : {', '.join(str(t) for t in tp_sizes)}")
+    print(f"  Oversubscribe: {', '.join(str(o) for o in os_values)}")
+    print(f"  Threads      : {', '.join(str(t) for t in threads)}")
+    print(f"  Records      : {len(rows)} individual runs (up to {max_runs} per configuration)")
 
 
 if __name__ == "__main__":
