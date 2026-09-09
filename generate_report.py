@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter
@@ -33,6 +34,17 @@ FILENAME_RE = re.compile(
 TPS_RE = re.compile(r"transactions:\s*\d+\s*\(([0-9.]+)\s*per sec\.\)")
 QPS_RE = re.compile(r"queries:\s*\d+\s*\(([0-9.]+)\s*per sec\.\)")
 TOTAL_TIME_RE = re.compile(r"total time:\s*([0-9.]+)s")
+# Exact p95 from the summary ("95th percentile: 26.68"). sysbench records only
+# this one percentile, so p99 is derived from the per-second report lines
+# ("lat (ms,95%): 27.66"): the 99th percentile of the per-second p95 samples.
+LAT95_RE = re.compile(r"95th percentile:\s*([0-9.]+)")
+LAT_SEC_RE = re.compile(r"lat \(ms,95%\):\s*([0-9.]+)")
+
+
+def percentile(values, pct):
+    vs = sorted(values)
+    k = max(0, min(len(vs) - 1, math.ceil(pct / 100 * len(vs)) - 1))
+    return vs[k]
 
 
 # --------------------------------------------------------------------------
@@ -47,7 +59,11 @@ def extract_rates(path: Path):
         return None
     time_match = TOTAL_TIME_RE.search(text)
     duration = float(time_match.group(1)) if time_match else None
-    return float(tps_match.group(1)), float(qps_match.group(1)), duration
+    lat95_match = LAT95_RE.search(text)
+    lat95 = float(lat95_match.group(1)) if lat95_match else None
+    per_sec = [float(v) for v in LAT_SEC_RE.findall(text)]
+    lat99 = round(percentile(per_sec, 99), 2) if per_sec else None
+    return float(tps_match.group(1)), float(qps_match.group(1)), lat95, lat99, duration
 
 
 def iter_sysbench_files(base_dir: Path):
@@ -68,7 +84,7 @@ def scan_runs(base_dir: Path):
     """One entry per individual run; averaging happens client-side in the report."""
     rows = []
     durations = []
-    for server, version, m, (tps, qps, duration) in iter_sysbench_files(base_dir):
+    for server, version, m, (tps, qps, lat95, lat99, duration) in iter_sysbench_files(base_dir):
         if duration:
             durations.append(duration)
         rows.append({
@@ -83,6 +99,8 @@ def scan_runs(base_dir: Path):
             "threads": int(m.group("threads")),
             "tps": round(tps, 2),
             "qps": round(qps, 2),
+            "lat95": lat95,
+            "lat99": lat99,
         })
     rows.sort(key=lambda r: (r["server"], r["run"], r["mem_gb"],
                              str(r["tp"]), r["os"] or 0, r["threads"]))
@@ -307,6 +325,28 @@ TEMPLATE = r"""<!doctype html>
         </label>
       </div>
 
+      <label>Metric</label>
+      <div style="display: flex; gap: 12px 16px; flex-wrap: wrap;">
+        <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
+          <input type="radio" name="metricMode" value="tps" checked> TPS
+        </label>
+        <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
+          <input type="radio" name="metricMode" value="qps"> QPS
+        </label>
+        <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
+          <input type="radio" name="metricMode" value="lat95"> Latency p95
+        </label>
+        <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
+          <input type="radio" name="metricMode" value="lat99"> Latency p99*
+        </label>
+      </div>
+      <div class="hint">
+        Latency is in milliseconds; lower is better. p95 is exact (sysbench summary).
+        * sysbench only records the 95th percentile, so p99 is derived: the 99th
+        percentile of the per-second p95 samples &mdash; a tail-stability measure,
+        not a true transaction p99.
+      </div>
+
       <div class="btnrow">
         <button id="allServersBtn">All servers</button>
         <button id="allMemsBtn">All buffer pools</button>
@@ -419,8 +459,20 @@ function tpLabel(tp, os) {
 
 const DEFAULT_MEM = MEMS.includes(12) ? 12 : MEMS[0];
 
+const METRICS = {
+  tps:   { title: "Transactions per second (TPS)", short: "TPS",
+           fmt: v => Math.round(v).toLocaleString() },
+  qps:   { title: "Queries per second (QPS)", short: "QPS",
+           fmt: v => Math.round(v).toLocaleString() },
+  lat95: { title: "Latency p95 (ms)", short: "Latency p95",
+           fmt: v => v.toFixed(2) },
+  lat99: { title: "Latency p99* (ms, 99th pct of per-second p95)", short: "Latency p99*",
+           fmt: v => v.toFixed(2) },
+};
+
 let VIEW_MODE = "average";
 let DISPLAY_MODE = "graph";
+let METRIC = "tps";
 
 function computeData() {
   if (VIEW_MODE === "individual") {
@@ -428,6 +480,7 @@ function computeData() {
       server: `run${r.run}-${r.server.replace(/ /g, "-")}`,
       rows: r.rows, mem_gb: r.mem_gb, tp: r.tp, os: r.os,
       threads: r.threads, tps: r.tps, qps: r.qps,
+      lat95: r.lat95, lat99: r.lat99,
       file: r.file,
     }));
   }
@@ -438,18 +491,23 @@ function computeData() {
     let g = groups.get(key);
     if (!g) {
       g = {server: r.server, rows: r.rows, mem_gb: r.mem_gb, tp: r.tp, os: r.os,
-           threads: r.threads, tps: [], qps: []};
+           threads: r.threads, tps: [], qps: [], lat95: [], lat99: []};
       groups.set(key, g);
     }
     g.tps.push(r.tps);
     g.qps.push(r.qps);
+    if (r.lat95 !== null) g.lat95.push(r.lat95);
+    if (r.lat99 !== null) g.lat99.push(r.lat99);
   });
-  const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
+  const mean = a => a.length ? a.reduce((s, v) => s + v, 0) / a.length : null;
+  const r2 = v => v === null ? null : Math.round(v * 100) / 100;
   return Array.from(groups.values()).map(g => ({
     server: g.server, rows: g.rows, mem_gb: g.mem_gb, tp: g.tp, os: g.os,
     threads: g.threads,
-    tps: Math.round(mean(g.tps) * 100) / 100,
-    qps: Math.round(mean(g.qps) * 100) / 100,
+    tps: r2(mean(g.tps)),
+    qps: r2(mean(g.qps)),
+    lat95: r2(mean(g.lat95)),
+    lat99: r2(mean(g.lat99)),
   }));
 }
 
@@ -494,7 +552,7 @@ function selectedSeries() {
 }
 
 function buildTraces() {
-  const metric = "tps";
+  const metric = METRIC;
 
   return selectedSeries().map(s => ({
     type: "scatter",
@@ -504,7 +562,8 @@ function buildTraces() {
     y: s.pts.map(p=>p[metric]),
     customdata: s.pts.map(p=>({server: p.server, rows: p.rows, mem_gb: p.mem_gb,
                                tp: p.tp, os: p.os, tpLabel: tpLabel(p.tp, p.os),
-                               threads: p.threads, tps: p.tps, qps: p.qps, file: p.file})),
+                               threads: p.threads, tps: p.tps, qps: p.qps,
+                               lat95: p.lat95, lat99: p.lat99, file: p.file})),
     marker: { size: 10 },
     hovertemplate:
       '<b>%{customdata.server}</b><br>' +
@@ -512,7 +571,9 @@ function buildTraces() {
       'Thread pool: %{customdata.tpLabel}<br>' +
       'Threads: %{customdata.threads}<br>' +
       'TPS: %{customdata.tps:,.0f}<br>' +
-      'QPS: %{customdata.qps:,.0f}' +
+      'QPS: %{customdata.qps:,.0f}<br>' +
+      'Latency p95: %{customdata.lat95} ms<br>' +
+      'Latency p99*: %{customdata.lat99} ms' +
       '<extra></extra>',
   }));
 }
@@ -525,7 +586,7 @@ function buildTable() {
 
   const caption = document.createElement("div");
   caption.className = "caption";
-  caption.textContent = "Transactions per second (TPS) by client threads";
+  caption.textContent = `${METRICS[METRIC].title} by client threads`;
   container.appendChild(caption);
 
   const table = document.createElement("table");
@@ -555,10 +616,11 @@ function buildTable() {
     THREADS.forEach(t => {
       const td = document.createElement("td");
       const p = byThreads.get(t);
-      if (p) {
+      if (p && p[METRIC] !== null) {
         td.className = "pt";
-        td.textContent = Math.round(p.tps).toLocaleString();
-        td.title = `TPS: ${p.tps.toLocaleString()}  QPS: ${p.qps.toLocaleString()} (click for log files)`;
+        td.textContent = METRICS[METRIC].fmt(p[METRIC]);
+        td.title = `TPS: ${p.tps.toLocaleString()}  QPS: ${p.qps.toLocaleString()}  ` +
+                   `p95: ${p.lat95} ms  p99*: ${p.lat99} ms (click for log files)`;
         td.addEventListener("click", () => showDownloadModal(p));
       } else {
         td.textContent = "—";
@@ -572,10 +634,10 @@ function buildTable() {
 }
 
 function layoutForMode() {
-  const yTitle = "Transactions per second (TPS)";
+  const yTitle = METRICS[METRIC].title;
 
   return {
-    title: { text: `Sysbench {{TEST_TYPE}}: ${yTitle} vs Threads` },
+    title: { text: `Sysbench {{TEST_TYPE}}: ${METRICS[METRIC].short} vs Threads` },
     xaxis: {
       title: "Threads",
       type: "log",
@@ -648,8 +710,8 @@ function showDownloadModal(d) {
   document.getElementById('dlTitle').textContent = displayServer;
   document.getElementById('dlSubtitle').textContent =
     isIndividualRun
-      ? `Run: ${runNum}  ·  Rows: ${d.rows}  ·  Buffer pool: ${mem_gb}G  ·  Thread pool: ${tpLabel(d.tp, d.os)}  ·  Threads: ${threads}  ·  TPS: ${tps.toLocaleString()}  ·  QPS: ${qps.toLocaleString()}`
-      : `Rows: ${d.rows}  ·  Buffer pool: ${mem_gb}G  ·  Thread pool: ${tpLabel(d.tp, d.os)}  ·  Threads: ${threads}  ·  Average TPS: ${tps.toLocaleString()}  ·  Average QPS: ${qps.toLocaleString()}`;
+      ? `Run: ${runNum}  ·  Rows: ${d.rows}  ·  Buffer pool: ${mem_gb}G  ·  Thread pool: ${tpLabel(d.tp, d.os)}  ·  Threads: ${threads}  ·  TPS: ${tps.toLocaleString()}  ·  QPS: ${qps.toLocaleString()}  ·  p95: ${d.lat95} ms  ·  p99*: ${d.lat99} ms`
+      : `Rows: ${d.rows}  ·  Buffer pool: ${mem_gb}G  ·  Thread pool: ${tpLabel(d.tp, d.os)}  ·  Threads: ${threads}  ·  Average TPS: ${tps.toLocaleString()}  ·  Average QPS: ${qps.toLocaleString()}  ·  p95: ${d.lat95} ms  ·  p99*: ${d.lat99} ms`;
   const list = document.getElementById('dlLinks');
   list.innerHTML = '';
 
@@ -719,6 +781,13 @@ function applyUrlParams() {
     if (radio) radio.checked = true;
   }
 
+  const metric = params.get("metric");
+  if (metric && METRICS[metric]) {
+    METRIC = metric;
+    const radio = document.querySelector(`input[name="metricMode"][value="${metric}"]`);
+    if (radio) radio.checked = true;
+  }
+
   // Accept "4" and "4G" alike for the buffer pool
   applyListParam(params, "mem", el("memSel"), MEMS, s => s.replace(/[Gg]$/, ""));
   applyListParam(params, "tp", el("tpSel"), TP_SIZES, s => s.toLowerCase());
@@ -728,6 +797,7 @@ function applyUrlParams() {
 function syncUrl() {
   const params = new URLSearchParams(window.location.search);
   params.set("display", DISPLAY_MODE);
+  params.set("metric", METRIC);
   const mems = getSelectedValues(el("memSel"));
   params.set("mem", mems.length === MEMS.length ? "all" : mems.join(","));
   const tps = getSelectedValues(el("tpSel"));
@@ -788,6 +858,13 @@ function init() {
     });
   });
 
+  document.querySelectorAll('input[name="metricMode"]').forEach(radio => {
+    radio.addEventListener("change", () => {
+      METRIC = radio.value;
+      render();
+    });
+  });
+
   el("allServersBtn").addEventListener("click", () => { setSelected(el("serverSel"), _ => true); render(); });
   el("allMemsBtn").addEventListener("click", () => { setSelected(el("memSel"), _ => true); render(); });
   el("allTpsBtn").addEventListener("click", () => { setSelected(el("tpSel"), _ => true); render(); });
@@ -805,6 +882,8 @@ function init() {
   if (checked) VIEW_MODE = checked.value;
   const checkedDisplay = document.querySelector('input[name="displayMode"]:checked');
   if (checkedDisplay) DISPLAY_MODE = checkedDisplay.value;
+  const checkedMetric = document.querySelector('input[name="metricMode"]:checked');
+  if (checkedMetric) METRIC = checkedMetric.value;
   DATA = computeData();
   refreshServers();
 
@@ -904,7 +983,10 @@ def main():
         ("Oversubscribe (thread_pool_oversubscribe)",
          ", ".join(str(o) for o in os_values)),
         ("Client threads", ", ".join(str(t) for t in threads)),
-        ("Metric", "Transactions per second (TPS); QPS shown in hover tooltips"),
+        ("Metrics", "TPS, QPS, latency p95 (exact, sysbench summary), latency p99* "
+         "(99th percentile of the per-second p95 samples; sysbench records only "
+         "the 95th percentile, so this is a tail-stability measure, not a true "
+         "transaction p99)"),
     ]
 
     out = (

@@ -482,7 +482,7 @@ generate_config() {
     echo "max_prepared_stmt_count         = 1000000" >> "$CFG"
     echo "thread_stack                    = 512K" >> "$CFG"
     echo "thread_cache_size               = 256" >> "$CFG"
-    echo "back_log                        = 4096" >> "$CFG"
+    echo "back_log                        = 8192" >> "$CFG"
     echo "wait_timeout                    = 300" >> "$CFG"
     echo "interactive_timeout             = 300" >> "$CFG"
     echo "connect_timeout                 = 60" >> "$CFG"
