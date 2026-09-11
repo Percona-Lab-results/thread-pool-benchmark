@@ -360,8 +360,8 @@ TEMPLATE = r"""<!doctype html>
         combinations. Missing points are omitted automatically.
         Click a data point to download its log files.
         Shareable URL parameters:
-        <code>?display=graph|table&amp;mem=2,32&amp;tp=off,80&amp;os=2,3</code>
-        (or <code>mem=all</code>, <code>tp=all</code>, <code>os=all</code>).
+        <code>?display=graph|table&amp;metric=tps|qps|lat95|lat99&amp;server=mysql%2026.7.0&amp;mem=2,32&amp;tp=off,80&amp;os=2,3</code>
+        (each list also accepts <code>all</code>).
       </div>
     </div>
 
@@ -788,6 +788,7 @@ function applyUrlParams() {
     if (radio) radio.checked = true;
   }
 
+  applyListParam(params, "server", el("serverSel"), serverList(), s => s);
   // Accept "4" and "4G" alike for the buffer pool
   applyListParam(params, "mem", el("memSel"), MEMS, s => s.replace(/[Gg]$/, ""));
   applyListParam(params, "tp", el("tpSel"), TP_SIZES, s => s.toLowerCase());
@@ -798,6 +799,8 @@ function syncUrl() {
   const params = new URLSearchParams(window.location.search);
   params.set("display", DISPLAY_MODE);
   params.set("metric", METRIC);
+  const servers = getSelectedValues(el("serverSel"));
+  params.set("server", servers.length === serverList().length ? "all" : servers.join(","));
   const mems = getSelectedValues(el("memSel"));
   params.set("mem", mems.length === MEMS.length ? "all" : mems.join(","));
   const tps = getSelectedValues(el("tpSel"));
