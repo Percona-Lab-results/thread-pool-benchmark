@@ -18,7 +18,7 @@
 #   --warmup=<seconds>   - (Optional) Read-write warmup time in seconds (default: 600)
 #   --duration=<seconds> - (Optional) Benchmark duration in seconds (default: 900)
 #   --thread-list=<list> - (Optional) Comma-separated sysbench thread counts
-#                          (default: 40,80,120,160,320,640,1280,2560)
+#                          (default: 40,80,160,320,640,1280,2560)
 #   --pool-size-list=<list> - (Optional) Comma-separated buffer pool sizes in GB
 #                          (default: 2,12,32)
 #   --thread-pool-size-list=<list> - (Optional) Comma-separated thread pool sizes to sweep;
@@ -58,7 +58,7 @@ DATADIR_BASE="/home/bogdan.degtyariov/servers/data"
 POOL_SIZES=(2 12 32)
 
 # Sysbench thread counts, overridden by --thread-list
-THREADS=(40 80 120 160 320 640 1280 2560)
+THREADS=(40 80 160 320 640 1280 2560)
 
 # Thread pool sweep values, overridden by --thread-pool-size-list;
 # "off" = thread pool disabled, numeric sizes are combined with each oversubscribe value
@@ -186,7 +186,8 @@ TP_SUPPORTED="0"
 if [[ "${DBMS_NAME,,}" == percona* ]]; then
     TP_SUPPORTED="1"
 elif [[ "${DBMS_NAME,,}" == mysql ]] && \
-     [ "$(printf '%s\n' 26.7.0 "$DBMS_VER" | sort -V | head -n1)" == "26.7.0" ]; then
+     [ "$(printf '%s\n' 9.7.2 "$DBMS_VER" | sort -V | head -n1)" == "9.7.2" ]; then
+    # MySQL ships the thread_pool plugin since 9.7.2 (26.7.0 included)
     TP_SUPPORTED="1"
 fi
 
@@ -502,7 +503,7 @@ generate_config() {
             echo "thread_pool_max_threads         = 12000" >> "$CFG"
             echo "thread_pool_oversubscribe       = $TP_OVERSUB" >> "$CFG"
         else
-            echo "# --- Thread Pool (MySQL 26.7.0+ plugin) -------------------------------------" >> "$CFG"
+            echo "# --- Thread Pool (MySQL 9.7.2+ plugin) --------------------------------------" >> "$CFG"
             echo "#thread_handling                = pool-of-threads   # Percona Server only" >> "$CFG"
             echo "plugin-load-add                 = thread_pool.so" >> "$CFG"
             echo "thread_pool_size                = $TP_SIZE" >> "$CFG"
