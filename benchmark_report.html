@@ -425,6 +425,12 @@ function buildTable() {
   caption.textContent = `${METRICS[METRIC].title} by client threads`;
   container.appendChild(caption);
 
+  // Columns come from the thread counts actually present in the visible
+  // series, so the table always shows exactly the points the graph plots.
+  const series = selectedSeries();
+  const cols = [...new Set(series.flatMap(s => s.pts.map(p => p.threads)))]
+    .sort((a, b) => a - b);
+
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
@@ -432,7 +438,7 @@ function buildTable() {
   nameTh.className = "name";
   nameTh.textContent = "Server | Buffer pool | Thread pool";
   headRow.appendChild(nameTh);
-  THREADS.forEach(t => {
+  cols.forEach(t => {
     const th = document.createElement("th");
     th.textContent = `${t} th`;
     headRow.appendChild(th);
@@ -441,7 +447,7 @@ function buildTable() {
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  selectedSeries().forEach(s => {
+  series.forEach(s => {
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
     nameTd.className = "name";
@@ -449,7 +455,7 @@ function buildTable() {
     tr.appendChild(nameTd);
 
     const byThreads = new Map(s.pts.map(p => [p.threads, p]));
-    THREADS.forEach(t => {
+    cols.forEach(t => {
       const td = document.createElement("td");
       const p = byThreads.get(t);
       if (p && p[METRIC] !== null) {

@@ -589,6 +589,12 @@ function buildTable() {
   caption.textContent = `${METRICS[METRIC].title} by client threads`;
   container.appendChild(caption);
 
+  // Columns come from the thread counts actually present in the visible
+  // series, so the table always shows exactly the points the graph plots.
+  const series = selectedSeries();
+  const cols = [...new Set(series.flatMap(s => s.pts.map(p => p.threads)))]
+    .sort((a, b) => a - b);
+
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
@@ -596,7 +602,7 @@ function buildTable() {
   nameTh.className = "name";
   nameTh.textContent = "Server | Buffer pool | Thread pool";
   headRow.appendChild(nameTh);
-  THREADS.forEach(t => {
+  cols.forEach(t => {
     const th = document.createElement("th");
     th.textContent = `${t} th`;
     headRow.appendChild(th);
@@ -605,7 +611,7 @@ function buildTable() {
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  selectedSeries().forEach(s => {
+  series.forEach(s => {
     const tr = document.createElement("tr");
     const nameTd = document.createElement("td");
     nameTd.className = "name";
@@ -613,7 +619,7 @@ function buildTable() {
     tr.appendChild(nameTd);
 
     const byThreads = new Map(s.pts.map(p => [p.threads, p]));
-    THREADS.forEach(t => {
+    cols.forEach(t => {
       const td = document.createElement("td");
       const p = byThreads.get(t);
       if (p && p[METRIC] !== null) {
@@ -931,6 +937,9 @@ def main():
                         help="Output HTML file (default: benchmark_report.html)")
     parser.add_argument("--test-type", default="OLTP Read-Write",
                         help='Test type label shown in the report (default: "OLTP Read-Write")')
+    parser.add_argument("--max-threads", type=int, default=2560,
+                        help="Ignore runs with more client threads than this (default: 2560). "
+                             "Raise it to include larger sweeps, e.g. --max-threads=10240")
     args = parser.parse_args()
 
     base_dir = Path(args.base_dir)
@@ -942,6 +951,13 @@ def main():
     print(f"Scanning: {base_dir}")
 
     rows, durations = scan_runs(base_dir)
+    excluded = [r for r in rows if r["threads"] > args.max_threads]
+    if excluded:
+        excl_threads = sorted({r["threads"] for r in excluded})
+        print(f"  note: excluded {len(excluded)} run(s) with threads > {args.max_threads} "
+              f"({', '.join(str(t) for t in excl_threads)}); "
+              f"raise --max-threads to include them", file=sys.stderr)
+        rows = [r for r in rows if r["threads"] <= args.max_threads]
     if not rows:
         sys.exit(f"No valid sysbench data found under '{base_dir}'")
 
