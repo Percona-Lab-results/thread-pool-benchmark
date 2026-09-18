@@ -29,8 +29,9 @@ FILENAME_RE = re.compile(
     r"^run(?P<run>\d+)_(?P<rows>\d+[KkMm]?)_Tier(?P<mem>\d+)G_"
     r"(?:tpoff|tp(?P<tp>\d+)_os(?P<os>\d+))_RW_(?P<threads>\d+)th\.sysbench\.txt$"
 )
-# Per-second report lines: "[ 887s ] thds: 40 tps: 2060.92 qps: ..."
+# Per-second report lines: "[ 887s ] thds: 40 tps: 2060.92 qps: ... lat (ms,95%): 27.66 ..."
 TPS_SEC_RE = re.compile(r"\btps: ([0-9.]+)")
+LAT_SEC_RE = re.compile(r"lat \(ms,95%\): ([0-9.]+)")
 
 
 def downsample(values, n):
@@ -53,7 +54,9 @@ def scan_runs(base_dir: Path, max_threads: int, samples: int):
                 threads = int(m.group("threads"))
                 if threads > max_threads:
                     continue
-                vals = [float(v) for v in TPS_SEC_RE.findall(f.read_text(errors="replace"))]
+                text = f.read_text(errors="replace")
+                vals = [float(v) for v in TPS_SEC_RE.findall(text)]
+                lat_vals = [float(v) for v in LAT_SEC_RE.findall(text)]
                 if not vals:
                     print(f"  NA result (skipped): {f}", file=sys.stderr)
                     continue
@@ -61,9 +64,10 @@ def scan_runs(base_dir: Path, max_threads: int, samples: int):
                 osub = None if m.group("os") is None else int(m.group("os"))
                 key = (f"{server_dir.name} {version_dir.name}", int(m.group("mem")),
                        tp, osub, threads)
-                g = groups.setdefault(key, {"samples": [], "runs": set(),
+                g = groups.setdefault(key, {"samples": [], "lat": [], "runs": set(),
                                             "rows": m.group("rows")})
                 g["samples"].extend(vals)
+                g["lat"].extend(lat_vals)
                 g["runs"].add(int(m.group("run")))
 
     records = []
@@ -75,6 +79,7 @@ def scan_runs(base_dir: Path, max_threads: int, samples: int):
             "rows": g["rows"],
             "runs": sorted(g["runs"]),
             "samples": [round(v, 1) for v in downsample(g["samples"], samples)],
+            "lat": [round(v, 2) for v in downsample(g["lat"], samples)],
         })
     return records
 
@@ -237,6 +242,16 @@ TEMPLATE = r"""<!doctype html>
         </label>
       </div>
 
+      <label>Metric</label>
+      <div style="display: flex; gap: 16px;">
+        <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
+          <input type="radio" name="metricMode" value="tps" checked> TPS
+        </label>
+        <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
+          <input type="radio" name="metricMode" value="lat95"> Latency p95
+        </label>
+      </div>
+
       <label>Median display</label>
       <div style="display: flex; gap: 16px;">
         <label style="font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0;">
@@ -289,7 +304,7 @@ TEMPLATE = r"""<!doctype html>
         again to bring the others back.
         Click a data point to download its log files.
         Shareable URL parameters:
-        <code>?display=graph|table&amp;shape=box|violin&amp;points=all|outliers|none&amp;median=lines,bars|none&amp;server=...&amp;mem=2,32&amp;tp=off,80&amp;os=2,3&amp;hide=...</code>
+        <code>?display=graph|table&amp;metric=tps|lat95&amp;shape=box|violin|circle&amp;points=all|outliers|none&amp;median=lines,bars|none&amp;server=...&amp;mem=2,32&amp;tp=off,80&amp;os=2,3&amp;hide=...</code>
         (each list also accepts <code>all</code>; <code>hide</code> lists series
         switched off via legend clicks and updates automatically).
       </div>
@@ -357,6 +372,17 @@ function median(values) {
   return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
 }
 
+// Metric selected in the sidebar: per-second TPS or per-second p95 latency
+function metricInfo() {
+  return radioVal("metricMode") === "lat95"
+    ? { field: "lat", title: "Latency p95, ms", unit: "ms",
+        label: "p95 latency", lowerBetter: true,
+        fmt: v => v.toFixed(2) }
+    : { field: "samples", title: "Throughput, trx / sec", unit: "tps",
+        label: "TPS", lowerBetter: false,
+        fmt: v => Math.round(v).toLocaleString() };
+}
+
 function radioVal(name) {
   return document.querySelector(`input[name="${name}"]:checked`).value;
 }
@@ -387,6 +413,8 @@ function applyUrlParams() {
 
   const display = params.get("display");
   if (display === "graph" || display === "table") setRadio("displayMode", display);
+  const metric = params.get("metric");
+  if (metric === "tps" || metric === "lat95") setRadio("metricMode", metric);
   const shape = params.get("shape");
   if (["box", "violin", "circle"].includes(shape)) setRadio("shapeMode", shape);
   const points = params.get("points");
@@ -413,6 +441,7 @@ function applyUrlParams() {
 function syncUrl() {
   const params = new URLSearchParams(window.location.search);
   params.set("display", radioVal("displayMode"));
+  params.set("metric", radioVal("metricMode"));
   params.set("shape", radioVal("shapeMode"));
   params.set("points", radioVal("pointsMode"));
   const med = [];
@@ -444,9 +473,12 @@ function buildTable(series, cats) {
   const container = el("tableView");
   container.innerHTML = "";
 
+  const MET = metricInfo();
+  const valsOf = p => p[MET.field];
+
   const caption = document.createElement("div");
   caption.className = "caption";
-  caption.textContent = "Median per-second TPS by client threads " +
+  caption.textContent = `Median per-second ${MET.label} by client threads ` +
     "(from the downsampled per-second samples)";
   container.appendChild(caption);
 
@@ -457,9 +489,9 @@ function buildTable(series, cats) {
     maps.forEach(m => {
       const p = m.get(c);
       if (!p) return;
-      const v = median(p.samples);
-      if (best === null || v > best) best = v;
-      if (worst === null || v < worst) worst = v;
+      const v = median(valsOf(p));
+      if (best === null || (MET.lowerBetter ? v < best : v > best)) best = v;
+      if (worst === null || (MET.lowerBetter ? v > worst : v < worst)) worst = v;
     });
     bestByCol.set(c, best);
     worstByCol.set(c, worst);
@@ -503,16 +535,16 @@ function buildTable(series, cats) {
       const td = document.createElement("td");
       const p = maps[i].get(c);
       if (p) {
-        const v = median(p.samples);
+        const v = median(valsOf(p));
         const best = bestByCol.get(c);
-        const ratio = v / best;
+        const ratio = MET.lowerBetter ? best / v : v / best;
         const isBest = v === best;
         const isWorst = !isBest && v === worstByCol.get(c);
         const pct = document.createElement("span");
         pct.className = "pct";
         pct.textContent = `${Math.round(ratio * 100)}%`;
         td.appendChild(pct);
-        td.appendChild(document.createTextNode(Math.round(v).toLocaleString()));
+        td.appendChild(document.createTextNode(MET.fmt(v)));
         if (isBest) {
           td.style.background = "hsl(120, 50%, 38%)";
           td.style.color = "#ffffff";
@@ -523,10 +555,11 @@ function buildTable(series, cats) {
         } else {
           td.style.color = ratioColor(ratio);
         }
-        const mn = Math.min(...p.samples), mx = Math.max(...p.samples);
-        const mean = p.samples.reduce((a, x) => a + x, 0) / p.samples.length;
-        const sd = Math.sqrt(p.samples.reduce((a, x) => a + (x - mean) * (x - mean), 0)
-                             / p.samples.length);
+        const vs = valsOf(p);
+        const mn = Math.min(...vs), mx = Math.max(...vs);
+        const mean = vs.reduce((a, x) => a + x, 0) / vs.length;
+        const sd = Math.sqrt(vs.reduce((a, x) => a + (x - mean) * (x - mean), 0)
+                             / vs.length);
         td.title = `${Math.round(ratio * 100)}% of the best in this column  ·  ` +
                    `min: ${mn.toLocaleString()}  max: ${mx.toLocaleString()}  ` +
                    `stddev: ${Math.round(sd).toLocaleString()}`;
@@ -602,12 +635,15 @@ function render() {
   const slotCenter = i => -0.45 + (i + 0.5) * slotW;
   const barW = slotW * 0.7;                           // 0.7 = 1 - boxgroupgap
 
+  const MET = metricInfo();
+  const valsOf = p => p[MET.field];
+
   // Median shown as semi-transparent bars from zero and/or as lines
   // connecting the medians -- each toggled independently in the sidebar
   const barTraces = !el("barsChk").checked ? [] : series.map((s, i) => ({
     type: "bar",
     x: s.pts.map(p => catIdx.get(String(p.threads))),
-    y: s.pts.map(p => median(p.samples)),
+    y: s.pts.map(p => median(valsOf(p))),
     width: barW,
     offset: slotCenter(i) - barW / 2,
     marker: { color: traceColor(i, series.length, 0.30) },
@@ -633,12 +669,13 @@ function render() {
         mode: "markers",
         name: s.name,
         x: s.pts.map(p => catIdx.get(String(p.threads)) + slotCenter(i)),
-        y: s.pts.map(p => median(p.samples)),
+        y: s.pts.map(p => median(valsOf(p))),
         customdata: s.pts.map(p => {
-          const mean = p.samples.reduce((a, v) => a + v, 0) / p.samples.length;
-          const sd = Math.sqrt(p.samples.reduce(
-            (a, v) => a + (v - mean) * (v - mean), 0) / p.samples.length);
-          return [Math.min(...p.samples), Math.max(...p.samples), sd, p.threads];
+          const vs = valsOf(p);
+          const mean = vs.reduce((a, v) => a + v, 0) / vs.length;
+          const sd = Math.sqrt(vs.reduce(
+            (a, v) => a + (v - mean) * (v - mean), 0) / vs.length);
+          return [Math.min(...vs), Math.max(...vs), sd, p.threads];
         }),
         marker: { size: 10, color: traceColor(i, N, ptAlpha),
                   line: { color: traceColor(i, N), width: 1.5 } },
@@ -647,7 +684,7 @@ function render() {
         hovertemplate:
           "<b>%{fullData.name}</b><br>" +
           "Threads: %{customdata[3]}<br>" +
-          "Median: %{y:,.1f} tps<br>" +
+          `Median: %{y:,.1f} ${MET.unit}<br>` +
           "Min: %{customdata[0]:,.1f}<br>" +
           "Max: %{customdata[1]:,.1f}<br>" +
           "Stddev: %{customdata[2]:,.1f}" +
@@ -658,12 +695,13 @@ function render() {
     s.pts.forEach(p => {
       const xi = catIdx.get(String(p.threads));
       // Per-config stats shown in the point tooltip
-      const mn = Math.min(...p.samples);
-      const mx = Math.max(...p.samples);
-      const mean = p.samples.reduce((a, v) => a + v, 0) / p.samples.length;
+      const vs = valsOf(p);
+      const mn = Math.min(...vs);
+      const mx = Math.max(...vs);
+      const mean = vs.reduce((a, v) => a + v, 0) / vs.length;
       const sd = Math.sqrt(
-        p.samples.reduce((a, v) => a + (v - mean) * (v - mean), 0) / p.samples.length);
-      p.samples.forEach(v => {
+        vs.reduce((a, v) => a + (v - mean) * (v - mean), 0) / vs.length);
+      vs.forEach(v => {
         x.push(xi);
         y.push(v);
         cd.push([mn, mx, sd, p.threads]);
@@ -698,7 +736,7 @@ function render() {
       t.hovertemplate =
         "<b>%{fullData.name}</b><br>" +
         "Threads: %{customdata[3]}<br>" +
-        "Value: %{y:,.1f} tps<br>" +
+        `Value: %{y:,.1f} ${MET.unit}<br>` +
         "Min: %{customdata[0]:,.1f}<br>" +
         "Max: %{customdata[1]:,.1f}<br>" +
         "Stddev: %{customdata[2]:,.1f}" +
@@ -718,7 +756,7 @@ function render() {
     type: "scatter",
     mode: "lines+markers",
     x: s.pts.map(p => catIdx.get(String(p.threads)) + slotCenter(i)),
-    y: s.pts.map(p => median(p.samples)),
+    y: s.pts.map(p => median(valsOf(p))),
     line: { color: traceColor(i, series.length, 0.45), width: 4 },
     marker: { size: 4, color: traceColor(i, series.length) },
     legendgroup: s.name,
@@ -763,7 +801,7 @@ function render() {
       range: [-0.55, cats.length - 0.45],
       zeroline: false,
     },
-    yaxis: { title: "Throughput, trx / sec", rangemode: "tozero", nticks: 20 },
+    yaxis: { title: MET.title, rangemode: "tozero", nticks: 20 },
     // Vertical legend to the right of the plot
     legend: {
       orientation: "v",
@@ -825,7 +863,8 @@ function showDownloadModal(p) {
   document.getElementById('dlSubtitle').textContent =
     `Rows: ${p.rows}  ·  Buffer pool: ${p.mem_gb}G  ·  Thread pool: ` +
     `${tpLabel(p.tp, p.os)}  ·  Threads: ${p.threads}  ·  Median TPS: ` +
-    `${Math.round(median(p.samples)).toLocaleString()}`;
+    `${Math.round(median(p.samples)).toLocaleString()}  ·  Median p95: ` +
+    `${median(p.lat).toFixed(2)} ms`;
   const list = document.getElementById('dlLinks');
   list.innerHTML = '';
 
@@ -955,7 +994,7 @@ function init() {
     el(id).addEventListener("change", render);
   });
   document.querySelectorAll(
-    'input[name="shapeMode"], input[name="pointsMode"], input[name="displayMode"]')
+    'input[name="shapeMode"], input[name="pointsMode"], input[name="displayMode"], input[name="metricMode"]')
     .forEach(radio => radio.addEventListener("change", render));
   el("resetBtn").addEventListener("click", () => {
     setSelected(el("serverSel"), _ => true);
@@ -1004,8 +1043,8 @@ def main():
     )
     parser.add_argument("--base-dir", default="benchmark_logs",
                         help="Directory with <server>/<version>/ benchmark logs (default: benchmark_logs)")
-    parser.add_argument("--output", default="benchmark_jitter_report.html",
-                        help="Output HTML file (default: benchmark_jitter_report.html)")
+    parser.add_argument("--output", default="benchmark_report.html",
+                        help="Output HTML file (default: benchmark_report.html)")
     parser.add_argument("--max-threads", type=int, default=2560,
                         help="Ignore runs with more client threads than this (default: 2560)")
     parser.add_argument("--samples", type=int, default=200,
