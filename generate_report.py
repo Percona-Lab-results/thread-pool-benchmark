@@ -39,6 +39,9 @@ TOTAL_TIME_RE = re.compile(r"total time:\s*([0-9.]+)s")
 # ("lat (ms,95%): 27.66"): the 99th percentile of the per-second p95 samples.
 LAT95_RE = re.compile(r"95th percentile:\s*([0-9.]+)")
 LAT_SEC_RE = re.compile(r"lat \(ms,95%\):\s*([0-9.]+)")
+# "Threads fairness: events (avg/stddev): 47441.7500/34.88" -- per-thread event
+# counts; stddev/avg gives the relative spread used for TPS/QPS error bars.
+EVENTS_RE = re.compile(r"events \(avg/stddev\):\s*([0-9.]+)/([0-9.]+)")
 
 
 def percentile(values, pct):
@@ -63,7 +66,16 @@ def extract_rates(path: Path):
     lat95 = float(lat95_match.group(1)) if lat95_match else None
     per_sec = [float(v) for v in LAT_SEC_RE.findall(text)]
     lat99 = round(percentile(per_sec, 99), 2) if per_sec else None
-    return float(tps_match.group(1)), float(qps_match.group(1)), lat95, lat99, duration
+    tps, qps = float(tps_match.group(1)), float(qps_match.group(1))
+    # Relative stddev of per-thread event counts (thread fairness) scaled into
+    # the metric's own units for error bars
+    ev_match = EVENTS_RE.search(text)
+    rel_sd = None
+    if ev_match and float(ev_match.group(1)) > 0:
+        rel_sd = float(ev_match.group(2)) / float(ev_match.group(1))
+    tps_sd = round(tps * rel_sd, 2) if rel_sd is not None else None
+    qps_sd = round(qps * rel_sd, 2) if rel_sd is not None else None
+    return tps, qps, tps_sd, qps_sd, lat95, lat99, duration
 
 
 def iter_sysbench_files(base_dir: Path):
@@ -84,7 +96,7 @@ def scan_runs(base_dir: Path):
     """One entry per individual run; averaging happens client-side in the report."""
     rows = []
     durations = []
-    for server, version, m, (tps, qps, lat95, lat99, duration) in iter_sysbench_files(base_dir):
+    for server, version, m, (tps, qps, tps_sd, qps_sd, lat95, lat99, duration) in iter_sysbench_files(base_dir):
         if duration:
             durations.append(duration)
         rows.append({
@@ -99,6 +111,8 @@ def scan_runs(base_dir: Path):
             "threads": int(m.group("threads")),
             "tps": round(tps, 2),
             "qps": round(qps, 2),
+            "tps_sd": tps_sd,
+            "qps_sd": qps_sd,
             "lat95": lat95,
             "lat99": lat99,
         })
@@ -218,13 +232,18 @@ TEMPLATE = r"""<!doctype html>
     button { padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #eee; }
     #chart { height: 620px; cursor: crosshair; }
+    /* Plotly marks legend entries of hidden (legendonly) traces with an
+       inline opacity of 0.5; fade them further so the disabled state is
+       clearly visible */
+    #chart .legend g.traces[style*="opacity: 0.5"] { opacity: 0.2 !important; }
     #tableView { max-height: 620px; overflow: auto; }
     #tableView table { border-collapse: collapse; width: 100%; font-family: monospace; font-size: 13px; }
     #tableView th, #tableView td { border: 1px solid #ccc; padding: 5px 10px; text-align: right; white-space: nowrap; }
     #tableView th { background: #e8eaf0; color: #555; position: sticky; top: 0; }
     #tableView th.name, #tableView td.name { text-align: left; }
     #tableView td.pt { cursor: pointer; }
-    #tableView td.pt:hover { background: #e8f0fe; }
+    #tableView td.pt:hover { text-decoration: underline; }
+    #tableView .pct { font-size: 10px; opacity: 0.75; float: left; margin-right: 8px; }
     #tableView .caption { font-family: system-ui, sans-serif; font-size: 13px; font-weight: 700; color: #333; margin: 4px 0 8px; }
 
     /* Download modal */
@@ -360,8 +379,9 @@ TEMPLATE = r"""<!doctype html>
         combinations. Missing points are omitted automatically.
         Click a data point to download its log files.
         Shareable URL parameters:
-        <code>?display=graph|table&amp;metric=tps|qps|lat95|lat99&amp;server=mysql%2026.7.0&amp;mem=2,32&amp;tp=off,80&amp;os=2,3</code>
-        (each list also accepts <code>all</code>).
+        <code>?display=graph|table&amp;metric=tps|qps|lat95|lat99&amp;server=mysql%2026.7.0&amp;mem=2,32&amp;tp=off,80&amp;os=2,3&amp;hide=...</code>
+        (each list also accepts <code>all</code>; <code>hide</code> lists series
+        switched off via legend clicks and updates automatically).
       </div>
     </div>
 
@@ -473,6 +493,9 @@ const METRICS = {
 let VIEW_MODE = "average";
 let DISPLAY_MODE = "graph";
 let METRIC = "tps";
+// Series names hidden via legend clicks; persisted in the URL (?hide=...) so
+// a link reproduces the exact graph configuration
+let HIDDEN = new Set();
 
 function computeData() {
   if (VIEW_MODE === "individual") {
@@ -480,6 +503,7 @@ function computeData() {
       server: `run${r.run}-${r.server.replace(/ /g, "-")}`,
       rows: r.rows, mem_gb: r.mem_gb, tp: r.tp, os: r.os,
       threads: r.threads, tps: r.tps, qps: r.qps,
+      tps_sd: r.tps_sd, qps_sd: r.qps_sd,
       lat95: r.lat95, lat99: r.lat99,
       file: r.file,
     }));
@@ -491,11 +515,14 @@ function computeData() {
     let g = groups.get(key);
     if (!g) {
       g = {server: r.server, rows: r.rows, mem_gb: r.mem_gb, tp: r.tp, os: r.os,
-           threads: r.threads, tps: [], qps: [], lat95: [], lat99: []};
+           threads: r.threads, tps: [], qps: [], tps_sd: [], qps_sd: [],
+           lat95: [], lat99: []};
       groups.set(key, g);
     }
     g.tps.push(r.tps);
     g.qps.push(r.qps);
+    if (r.tps_sd !== null) g.tps_sd.push(r.tps_sd);
+    if (r.qps_sd !== null) g.qps_sd.push(r.qps_sd);
     if (r.lat95 !== null) g.lat95.push(r.lat95);
     if (r.lat99 !== null) g.lat99.push(r.lat99);
   });
@@ -506,6 +533,8 @@ function computeData() {
     threads: g.threads,
     tps: r2(mean(g.tps)),
     qps: r2(mean(g.qps)),
+    tps_sd: r2(mean(g.tps_sd)),
+    qps_sd: r2(mean(g.qps_sd)),
     lat95: r2(mean(g.lat95)),
     lat99: r2(mean(g.lat99)),
   }));
@@ -551,31 +580,106 @@ function selectedSeries() {
   return series;
 }
 
+// Evenly spaced hues with alternating lightness, so every visible series gets
+// its own color (Plotly's default 10-color palette repeats beyond 10 traces)
+function traceColor(i, n, alpha) {
+  const hue = Math.round((i * 360) / Math.max(n, 1));
+  // muted tones close to Plotly's default palette
+  const light = i % 2 ? 56 : 40;
+  return alpha === undefined
+    ? `hsl(${hue}, 52%, ${light}%)`
+    : `hsla(${hue}, 52%, ${light}%, ${alpha})`;
+}
+
 function buildTraces() {
   const metric = METRIC;
+  // ±1 stddev, derived from sysbench "Threads fairness" events (avg/stddev);
+  // shown as semi-transparent circles whose area scales with the stddev.
+  // Only meaningful for throughput metrics.
+  const sdKey = metric === "tps" ? "tps_sd" : metric === "qps" ? "qps_sd" : null;
 
-  return selectedSeries().map(s => ({
+  const series = selectedSeries();
+
+  // One shared area scale for all error circles: the largest visible stddev
+  // gets MAX_ERR_PX pixels of diameter
+  let errorTraces = [];
+  if (sdKey) {
+    const MAX_ERR_PX = 34;
+    // Outline a circle only once it is big enough to be visible beyond the
+    // 5px data marker
+    const OUTLINE_MIN_PX = 8;
+    const maxSd = Math.max(1e-9, ...series.flatMap(s => s.pts.map(p => p[sdKey] || 0)));
+    const sizeref = (2.0 * maxSd) / (MAX_ERR_PX * MAX_ERR_PX);
+    const diameterPx = sd => Math.sqrt(2 * (sd || 0) / sizeref);
+    errorTraces = series.map((s, i) => ({
+      type: "scatter",
+      mode: "markers",
+      x: s.pts.map(p=>p.threads),
+      y: s.pts.map(p=>p[metric]),
+      marker: {
+        size: s.pts.map(p => p[sdKey] || 0),
+        sizemode: "area",
+        sizeref: sizeref,
+        sizemin: 0,
+        // translucent fill + opaque thin outline (marker.opacity would dim
+        // the outline too, so the alpha lives in the fill color)
+        color: traceColor(i, series.length, 0.25),
+        line: {
+          color: traceColor(i, series.length),
+          width: s.pts.map(p => diameterPx(p[sdKey]) >= OUTLINE_MIN_PX ? 1 : 0),
+        },
+      },
+      legendgroup: s.name,
+      showlegend: false,
+      hoverinfo: "skip",
+      visible: HIDDEN.has(s.name) ? "legendonly" : true,
+    }));
+  }
+
+  const lineTraces = series.map((s, i) => ({
     type: "scatter",
     mode: "lines+markers",
     name: s.name,
+    legendgroup: s.name,
+    visible: HIDDEN.has(s.name) ? "legendonly" : true,
     x: s.pts.map(p=>p.threads),
     y: s.pts.map(p=>p[metric]),
+    line: { color: traceColor(i, series.length) },
     customdata: s.pts.map(p=>({server: p.server, rows: p.rows, mem_gb: p.mem_gb,
                                tp: p.tp, os: p.os, tpLabel: tpLabel(p.tp, p.os),
                                threads: p.threads, tps: p.tps, qps: p.qps,
+                               tps_sd: p.tps_sd, qps_sd: p.qps_sd,
                                lat95: p.lat95, lat99: p.lat99, file: p.file})),
-    marker: { size: 10 },
+    marker: { size: 5, color: traceColor(i, series.length) },
     hovertemplate:
       '<b>%{customdata.server}</b><br>' +
       'Buffer pool: %{customdata.mem_gb}G<br>' +
       'Thread pool: %{customdata.tpLabel}<br>' +
       'Threads: %{customdata.threads}<br>' +
-      'TPS: %{customdata.tps:,.0f}<br>' +
-      'QPS: %{customdata.qps:,.0f}<br>' +
+      'TPS: %{customdata.tps:,.0f} &plusmn;%{customdata.tps_sd}<br>' +
+      'QPS: %{customdata.qps:,.0f} &plusmn;%{customdata.qps_sd}<br>' +
       'Latency p95: %{customdata.lat95} ms<br>' +
       'Latency p99*: %{customdata.lat99} ms' +
       '<extra></extra>',
   }));
+
+  // Tiny bright dot on each node so its exact centre stays visible inside
+  // the error circles
+  const centerTraces = series.map((s, i) => ({
+    type: "scatter",
+    mode: "markers",
+    x: s.pts.map(p=>p.threads),
+    y: s.pts.map(p=>p[metric]),
+    marker: { size: 2, color: "rgba(255, 255, 255, 0.65)" },
+    legendgroup: s.name,
+    showlegend: false,
+    hoverinfo: "skip",
+    visible: HIDDEN.has(s.name) ? "legendonly" : true,
+  }));
+
+  // Error circles first so the lines and markers draw on top of them,
+  // centre dots last so they stay on top of the node markers
+  return [...errorTraces, ...lineTraces, ...centerTraces];
 }
 
 // TPS table: one row per (server, mem, tp[, os]) series, one column per thread
@@ -595,6 +699,36 @@ function buildTable() {
   const cols = [...new Set(series.flatMap(s => s.pts.map(p => p.threads)))]
     .sort((a, b) => a - b);
 
+  // Per-column best value (baseline 100%): highest for throughput metrics,
+  // lowest for latency metrics
+  const lowerBetter = METRIC.startsWith("lat");
+  const seriesMaps = series.map(s => new Map(s.pts.map(p => [p.threads, p])));
+  const bestByCol = new Map();
+  const worstByCol = new Map();
+  cols.forEach(t => {
+    let best = null, worst = null;
+    seriesMaps.forEach(m => {
+      const p = m.get(t);
+      if (!p || p[METRIC] === null) return;
+      if (best === null || (lowerBetter ? p[METRIC] < best : p[METRIC] > best)) {
+        best = p[METRIC];
+      }
+      if (worst === null || (lowerBetter ? p[METRIC] > worst : p[METRIC] < worst)) {
+        worst = p[METRIC];
+      }
+    });
+    bestByCol.set(t, best);
+    worstByCol.set(t, worst);
+  });
+
+  // ratio of best, 0..1 -> text color: green while within 10% of the best,
+  // then fading through yellow/orange into red at 10% of the best
+  function ratioColor(ratio) {
+    const tNorm = Math.max(0, Math.min(1, (ratio - 0.1) / 0.8));
+    const hue = Math.round(120 * tNorm);
+    return `hsl(${hue}, 65%, 30%)`;
+  }
+
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
@@ -611,21 +745,48 @@ function buildTable() {
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  series.forEach(s => {
+  series.forEach((s, i) => {
     const tr = document.createElement("tr");
+    // Zebra-striped rows; hover darkens the row so it is easy to follow
+    const baseBg = i % 2 ? "#eeeeee" : "#ffffff";
+    const hoverBg = "#c7c7c7";
+    tr.style.background = baseBg;
+    tr.addEventListener("mouseenter", () => { tr.style.background = hoverBg; });
+    tr.addEventListener("mouseleave", () => { tr.style.background = baseBg; });
     const nameTd = document.createElement("td");
     nameTd.className = "name";
     nameTd.textContent = s.name;
     tr.appendChild(nameTd);
 
-    const byThreads = new Map(s.pts.map(p => [p.threads, p]));
+    const byThreads = seriesMaps[i];
     cols.forEach(t => {
       const td = document.createElement("td");
       const p = byThreads.get(t);
       if (p && p[METRIC] !== null) {
         td.className = "pt";
-        td.textContent = METRICS[METRIC].fmt(p[METRIC]);
-        td.title = `TPS: ${p.tps.toLocaleString()}  QPS: ${p.qps.toLocaleString()}  ` +
+        const best = bestByCol.get(t);
+        const ratio = lowerBetter ? best / p[METRIC] : p[METRIC] / best;
+        const isBest = p[METRIC] === best;
+        const pct = document.createElement("span");
+        pct.className = "pct";
+        pct.textContent = `${Math.round(ratio * 100)}%`;
+        td.appendChild(pct);
+        td.appendChild(document.createTextNode(METRICS[METRIC].fmt(p[METRIC])));
+        const isWorst = !isBest && p[METRIC] === worstByCol.get(t);
+        if (isBest) {
+          // Best value in the column: green background, bold white text
+          td.style.background = "hsl(120, 50%, 38%)";
+          td.style.color = "#ffffff";
+          td.style.fontWeight = "700";
+        } else if (isWorst) {
+          // Worst value in the column: its ratio color as background
+          td.style.background = ratioColor(ratio);
+          td.style.color = "#ffffff";
+        } else {
+          td.style.color = ratioColor(ratio);
+        }
+        td.title = `${Math.round(ratio * 100)}% of the best in this column  ·  ` +
+                   `TPS: ${p.tps.toLocaleString()}  QPS: ${p.qps.toLocaleString()}  ` +
                    `p95: ${p.lat95} ms  p99*: ${p.lat99} ms (click for log files)`;
         td.addEventListener("click", () => showDownloadModal(p));
       } else {
@@ -650,12 +811,16 @@ function layoutForMode() {
       tickvals: THREADS,
       ticktext: THREADS.map(String),
     },
-    yaxis: { title: yTitle, rangemode: 'tozero' },
-    // Vertical legend to the right of the plot so it never obstructs the lines
+    yaxis: { title: yTitle, rangemode: 'tozero', nticks: 20 },
+    // Vertical legend to the right of the plot so it never obstructs the
+    // lines; compact spacing so long sweeps fit without scrolling (every
+    // series is its own legendgroup, so tracegroupgap is the row gap)
     legend: {
       orientation: "v",
       x: 1.02, y: 1,
       xanchor: "left", yanchor: "top",
+      tracegroupgap: 0,
+      font: { size: 11 },
     },
     margin: { l: 70, r: 20, t: 60, b: 60 },
     hovermode: "closest",
@@ -760,6 +925,69 @@ function attachPlotlyClick() {
     if (!d) return;
     showDownloadModal(d);
   });
+  // Legend clicks (and double-click isolate) change trace visibility and fire
+  // plotly_restyle; mirror the hidden set into the URL. Hover highlighting
+  // below also restyles, so only sync when the hidden set actually changed.
+  chartDiv.removeAllListeners('plotly_restyle');
+  chartDiv.on('plotly_restyle', function() {
+    HIDDEN = new Set((chartDiv.data || [])
+      .filter(t => t.name && t.showlegend !== false && t.visible === 'legendonly')
+      .map(t => t.name));
+    const key = [...HIDDEN].sort().join(",");
+    if (key !== chartDiv._hiddenKey) {
+      chartDiv._hiddenKey = key;
+      syncUrl();
+    }
+  });
+
+  // Highlight the hovered series by redrawing it on top of everything with a
+  // dark border (a wider halo line underneath), so overlapping lines are easy
+  // to tell apart without fading the rest of the chart
+  let hoverGroup = null;
+  // The highlight traces are tagged via meta and located by scanning the
+  // current data: remembered indices go stale when the chart re-renders
+  // between hover events, which made deleteTraces throw
+  function clearHighlight() {
+    const idx = (chartDiv.data || [])
+      .map((t, i) => t.meta === "hover-highlight" ? i : -1)
+      .filter(i => i >= 0);
+    if (idx.length) {
+      try { Plotly.deleteTraces(chartDiv, idx); } catch (e) { /* mid-render */ }
+    }
+  }
+  chartDiv.removeAllListeners('plotly_hover');
+  chartDiv.on('plotly_hover', function(ev) {
+    if (!ev.points || !ev.points.length) return;
+    const trace = chartDiv.data[ev.points[0].curveNumber];
+    if (!trace || trace.meta === "hover-highlight") return;
+    const group = trace.legendgroup;
+    if (!group || group === hoverGroup) return;
+    clearHighlight();
+    hoverGroup = group;
+    const src = chartDiv.data.find(t => t.legendgroup === group && t.name);
+    if (!src) return;
+    const color = src.line.color;
+    // Minimal two-trace highlight: one solid white border line underneath,
+    // and the series redrawn on top with white-bordered node markers
+    // (marker.line is a native border -- no extra traces, no fading layers)
+    const halo = {
+      type: "scatter", mode: "lines", x: src.x, y: src.y,
+      line: { color: "#ffffff", width: 7 },
+      meta: "hover-highlight", hoverinfo: "skip", showlegend: false,
+    };
+    const top = {
+      type: "scatter", mode: "lines+markers", x: src.x, y: src.y,
+      line: { color: color, width: 2 },
+      marker: { size: 6, color: color, line: { color: "#ffffff", width: 1.5 } },
+      meta: "hover-highlight", hoverinfo: "skip", showlegend: false,
+    };
+    Plotly.addTraces(chartDiv, [halo, top]);
+  });
+  chartDiv.removeAllListeners('plotly_unhover');
+  chartDiv.on('plotly_unhover', function() {
+    hoverGroup = null;
+    clearHighlight();
+  });
 }
 
 // URL parameters, e.g. ?display=table&mem=2,32&tp=off,80&os=2,3
@@ -794,6 +1022,11 @@ function applyUrlParams() {
     if (radio) radio.checked = true;
   }
 
+  const hide = params.get("hide");
+  if (hide) {
+    HIDDEN = new Set(hide.split(",").map(s => s.trim()).filter(Boolean));
+  }
+
   applyListParam(params, "server", el("serverSel"), serverList(), s => s);
   // Accept "4" and "4G" alike for the buffer pool
   applyListParam(params, "mem", el("memSel"), MEMS, s => s.replace(/[Gg]$/, ""));
@@ -813,6 +1046,11 @@ function syncUrl() {
   params.set("tp", tps.length === TP_SIZES.length ? "all" : tps.join(","));
   const osVals = getSelectedValues(el("osSel"));
   params.set("os", osVals.length === OS_VALUES.length ? "all" : osVals.join(","));
+  if (HIDDEN.size) {
+    params.set("hide", [...HIDDEN].join(","));
+  } else {
+    params.delete("hide");
+  }
   try {
     history.replaceState(null, "", `${window.location.pathname}?${params}`);
   } catch (e) { /* file:// in some browsers forbids replaceState */ }
@@ -1006,6 +1244,11 @@ def main():
          "(99th percentile of the per-second p95 samples; sysbench records only "
          "the 95th percentile, so this is a tail-stability measure, not a true "
          "transaction p99)"),
+        ("Error circles", "Semi-transparent circles around TPS/QPS points whose "
+         "area scales with ±1 standard deviation, derived from the sysbench "
+         "\"Threads fairness: events (avg/stddev)\" summary: the relative spread "
+         "of per-thread event counts scaled to the metric. Large circles mean "
+         "unfair scheduling (some connections starved)."),
     ]
 
     out = (
