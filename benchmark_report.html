@@ -407,11 +407,12 @@ function selectedSeries() {
 // its own color (Plotly's default 10-color palette repeats beyond 10 traces)
 function traceColor(i, n, alpha) {
   const hue = Math.round((i * 360) / Math.max(n, 1));
-  // muted tones close to Plotly's default palette
-  const light = i % 2 ? 56 : 40;
+  // vivid tones in the spirit of the classic d3/Plotly palette
+  // (#1F77B4, #FF7F0E, #2CA02C, #D62728, ...)
+  const light = i % 2 ? 54 : 42;
   return alpha === undefined
-    ? `hsl(${hue}, 52%, ${light}%)`
-    : `hsla(${hue}, 52%, ${light}%, ${alpha})`;
+    ? `hsl(${hue}, 72%, ${light}%)`
+    : `hsla(${hue}, 72%, ${light}%, ${alpha})`;
 }
 
 function buildTraces() {
@@ -473,7 +474,7 @@ function buildTraces() {
                                threads: p.threads, tps: p.tps, qps: p.qps,
                                tps_sd: p.tps_sd, qps_sd: p.qps_sd,
                                lat95: p.lat95, lat99: p.lat99, file: p.file})),
-    marker: { size: 5, color: traceColor(i, series.length) },
+    marker: { size: 7, color: traceColor(i, series.length) },
     hovertemplate:
       '<b>%{customdata.server}</b><br>' +
       'Buffer pool: %{customdata.mem_gb}G<br>' +
@@ -493,16 +494,30 @@ function buildTraces() {
     mode: "markers",
     x: s.pts.map(p=>p.threads),
     y: s.pts.map(p=>p[metric]),
-    marker: { size: 2, color: "rgba(255, 255, 255, 0.65)" },
+    marker: { size: 3, color: "rgba(255, 255, 255, 0.65)" },
     legendgroup: s.name,
     showlegend: false,
     hoverinfo: "skip",
     visible: HIDDEN.has(s.name) ? "legendonly" : true,
   }));
 
+  // Two permanent, initially empty traces for the hover highlight. They are
+  // updated in place with Plotly.restyle, which is far cheaper than adding
+  // and deleting traces on every hover (that caused page freezes).
+  const highlightTraces = [
+    { type: "scatter", mode: "lines", x: [], y: [],
+      line: { color: "#ffffff", width: 7 },
+      meta: "hl-halo", hoverinfo: "skip", showlegend: false },
+    { type: "scatter", mode: "lines+markers", x: [], y: [],
+      line: { color: "#000000", width: 2 },
+      marker: { size: 8, color: "#000000",
+                line: { color: "#ffffff", width: 1.5 } },
+      meta: "hl-top", hoverinfo: "skip", showlegend: false },
+  ];
+
   // Error circles first so the lines and markers draw on top of them,
   // centre dots last so they stay on top of the node markers
-  return [...errorTraces, ...lineTraces, ...centerTraces];
+  return [...errorTraces, ...lineTraces, ...centerTraces, ...highlightTraces];
 }
 
 // TPS table: one row per (server, mem, tp[, os]) series, one column per thread
@@ -763,53 +778,65 @@ function attachPlotlyClick() {
     }
   });
 
-  // Highlight the hovered series by redrawing it on top of everything with a
-  // dark border (a wider halo line underneath), so overlapping lines are easy
-  // to tell apart without fading the rest of the chart
-  let hoverGroup = null;
-  // The highlight traces are tagged via meta and located by scanning the
-  // current data: remembered indices go stale when the chart re-renders
-  // between hover events, which made deleteTraces throw
-  function clearHighlight() {
-    const idx = (chartDiv.data || [])
-      .map((t, i) => t.meta === "hover-highlight" ? i : -1)
-      .filter(i => i >= 0);
-    if (idx.length) {
-      try { Plotly.deleteTraces(chartDiv, idx); } catch (e) { /* mid-render */ }
-    }
+  // Highlight the hovered series by drawing it into two pre-allocated
+  // traces (white border line + bright copy on top). Hover/unhover events
+  // only arm a timer; the single Plotly.restyle happens after the pointer
+  // settles, so sweeping across a busy region costs nothing and cannot
+  // freeze the page.
+  const HOVER_APPLY_MS = 120;
+  let hoverTimer = null;
+  let pendingGroup = null;   // group to apply, null = clear
+  let appliedGroup = null;   // group currently drawn
+
+  function highlightIdx() {
+    const data = chartDiv.data || [];
+    const halo = data.findIndex(t => t.meta === "hl-halo");
+    const top = data.findIndex(t => t.meta === "hl-top");
+    return halo >= 0 && top >= 0 ? [halo, top] : null;
   }
+
+  function applyPending() {
+    hoverTimer = null;
+    if (pendingGroup === appliedGroup) return;
+    const idx = highlightIdx();
+    if (!idx) return;
+    if (pendingGroup === null) {
+      appliedGroup = null;
+      Plotly.restyle(chartDiv, { x: [[], []], y: [[], []] }, idx);
+      return;
+    }
+    const src = (chartDiv.data || []).find(
+      t => t.legendgroup === pendingGroup && t.name);
+    if (!src) return;
+    appliedGroup = pendingGroup;
+    // Brighter version of the series color (full saturation, mid lightness)
+    // so the highlighted line pops next to the muted palette
+    const bright = src.line.color.replace(
+      /hsl\((\d+), \d+%, \d+%\)/, "hsl($1, 90%, 48%)");
+    Plotly.restyle(chartDiv, {
+      x: [src.x, src.x],
+      y: [src.y, src.y],
+      "line.color": ["#ffffff", bright],
+      "marker.color": ["#ffffff", bright],
+    }, idx);
+  }
+
+  function schedule(group) {
+    pendingGroup = group;
+    if (hoverTimer !== null) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(applyPending, HOVER_APPLY_MS);
+  }
+
   chartDiv.removeAllListeners('plotly_hover');
   chartDiv.on('plotly_hover', function(ev) {
     if (!ev.points || !ev.points.length) return;
     const trace = chartDiv.data[ev.points[0].curveNumber];
-    if (!trace || trace.meta === "hover-highlight") return;
-    const group = trace.legendgroup;
-    if (!group || group === hoverGroup) return;
-    clearHighlight();
-    hoverGroup = group;
-    const src = chartDiv.data.find(t => t.legendgroup === group && t.name);
-    if (!src) return;
-    const color = src.line.color;
-    // Minimal two-trace highlight: one solid white border line underneath,
-    // and the series redrawn on top with white-bordered node markers
-    // (marker.line is a native border -- no extra traces, no fading layers)
-    const halo = {
-      type: "scatter", mode: "lines", x: src.x, y: src.y,
-      line: { color: "#ffffff", width: 7 },
-      meta: "hover-highlight", hoverinfo: "skip", showlegend: false,
-    };
-    const top = {
-      type: "scatter", mode: "lines+markers", x: src.x, y: src.y,
-      line: { color: color, width: 2 },
-      marker: { size: 6, color: color, line: { color: "#ffffff", width: 1.5 } },
-      meta: "hover-highlight", hoverinfo: "skip", showlegend: false,
-    };
-    Plotly.addTraces(chartDiv, [halo, top]);
+    if (!trace || !trace.legendgroup) return;
+    schedule(trace.legendgroup);
   });
   chartDiv.removeAllListeners('plotly_unhover');
   chartDiv.on('plotly_unhover', function() {
-    hoverGroup = null;
-    clearHighlight();
+    schedule(null);
   });
 }
 
