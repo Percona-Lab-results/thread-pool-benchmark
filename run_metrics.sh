@@ -754,10 +754,50 @@ start_thread_status() {
     echo "Thread pool status -> ${OUT_THPOOL}"
     echo "Threads status -> ${OUT_THR}"
 
+    # MySQL's thread_pool plugin has no Threadpool_% status variables;
+    # emulate the Percona counters from the performance_schema tp_* tables
+    # so the .stat-thpool.txt files have the same shape for both servers
+    local THPOOL_QUERY
+    if [[ "${DBMS_NAME,,}" == mysql ]]; then
+        THPOOL_QUERY="SELECT
+    'Threadpool_average_hp_queue_wait_us' AS Variable_name,
+    'avg: 0.000, min: 0.000, max: 0.000, dev: 0.000, cnt: 0' AS Value
+UNION ALL
+SELECT
+    'Threadpool_average_queue_wait_us',
+    'avg: 0.000, min: 0.000, max: 0.000, dev: 0.000, cnt: 0'
+UNION ALL
+SELECT
+    'Threadpool_idle_threads',
+    CAST(COUNT(*) AS CHAR)
+FROM performance_schema.tp_thread_state WHERE STATE = 'sleeping'
+UNION ALL
+SELECT
+    'Threadpool_requests_starved_in_queue',
+    '0'
+UNION ALL
+SELECT
+    'Threadpool_requests_waiting_in_hp_queue',
+    CAST(IFNULL(SUM(QUEUED_QUERIES), 0) AS CHAR)
+FROM performance_schema.tp_thread_group_state
+UNION ALL
+SELECT
+    'Threadpool_requests_waiting_in_queue',
+    CAST(IFNULL(SUM(QUEUED_QUERIES + QUEUED_TRANSACTIONS), 0) AS CHAR)
+FROM performance_schema.tp_thread_group_state
+UNION ALL
+SELECT
+    'Threadpool_threads',
+    CAST(COUNT(*) AS CHAR)
+FROM performance_schema.tp_thread_state;"
+    else
+        THPOOL_QUERY="SHOW GLOBAL STATUS LIKE 'Threadpool%';"
+    fi
+
     (
         while :; do
             TS=$(date +%s.%3N)
-            "$MYSQL_CLIENT" -h "$DB_HOST" --port=$DB_PORT -u "$DB_USER" -p"$DB_PASS" -N -e "SHOW GLOBAL STATUS LIKE 'Threadpool%';" 2>/dev/null | awk -v ts="$TS" '{print ts"\t"$0}' >> "$OUT_THPOOL"
+            "$MYSQL_CLIENT" -h "$DB_HOST" --port=$DB_PORT -u "$DB_USER" -p"$DB_PASS" -N -e "$THPOOL_QUERY" 2>/dev/null | awk -v ts="$TS" '{print ts"\t"$0}' >> "$OUT_THPOOL"
             sleep 1
         done
     ) &
@@ -779,13 +819,16 @@ start_metrics() {
 
     iostat -dxm 1 > "${PREFIX}.iostat.txt" & echo $! > /tmp/iostat.pid
     vmstat 1 > "${PREFIX}.vmstat.txt" & echo $! > /tmp/vmstat.pid
-    mpstat -P ALL 1 > "${PREFIX}.mpstat.txt" & echo $! > /tmp/mpstat.pid
+    mpstat -P ALL 10 > "${PREFIX}.mpstat.txt" & echo $! > /tmp/mpstat.pid
     dstat -t 1 > "${PREFIX}.dstat.txt" & echo $! > /tmp/dstat.pid
 
     start_innodb_metrics "$PREFIX"
-    start_lru_metrics "$PREFIX"
-    start_mutex_metrics "$PREFIX"
-    start_gdb_snapshots "$PREFIX"
+    # LRU metrics collection disabled
+    #start_lru_metrics "$PREFIX"
+    # InnoDB mutex metrics collection disabled by default
+    #start_mutex_metrics "$PREFIX"
+    # pt-pmp stack profiling disabled
+    #start_gdb_snapshots "$PREFIX"
     start_thread_status "$PREFIX"
 }
 

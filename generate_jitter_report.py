@@ -776,7 +776,9 @@ function render() {
   }));
 
   const layout = {
-    title: { text: "Per-second throughput jitter (sysbench OLTP read-write)" +
+    title: { text: (MET.lowerBetter
+        ? "Latency p95 vs Threads (sysbench OLTP read-write)"
+        : "Per-second throughput jitter (sysbench OLTP read-write)") +
       "<br><sup>up to {{SAMPLES}} of the ~900 per-second samples shown per configuration (evenly downsampled)</sup>" },
     boxmode: "group",
     violinmode: "group",
