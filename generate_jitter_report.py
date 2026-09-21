@@ -158,59 +158,70 @@ TEMPLATE = r"""<!doctype html>
       color: #7a5d00; font-size: 13px;
     }
 
-    /* Download modal */
-    #dlOverlay {
-      display: none; position: fixed; inset: 0;
-      background: rgba(0,0,0,0.45); z-index: 1000;
-      align-items: center; justify-content: center;
+    /* Detail section (downloads + InnoDB charts) shown under the graph */
+    #detailSection { margin-top: 16px; }
+    #detailSection h3 { margin: 0 0 4px; font-size: 15px; color: #222; }
+    #detailSection h4 { margin: 16px 0 8px; font-size: 13px; color: #333; }
+    #detailSection .subtitle { font-size: 12px; color: #888; margin-bottom: 12px; }
+    .dl-list { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    @media (max-width: 1100px) {
+      .dl-list { grid-template-columns: 1fr; }
     }
-    #dlOverlay.open { display: flex; }
-    #dlModal {
-      background: #fff; border-radius: 14px; padding: 24px 28px;
-      max-width: 1250px; width: 94%; box-shadow: 0 8px 40px rgba(0,0,0,0.22);
-      position: relative; max-height: 88vh; overflow-y: auto;
-    }
-    #dlModal h3 { margin: 0 0 4px; font-size: 15px; color: #222; }
-    #dlModal .subtitle { font-size: 12px; color: #888; margin-bottom: 16px; }
-    #dlModal .dl-list { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    @media (max-width: 760px) {
-      #dlModal .dl-list { grid-template-columns: 1fr; }
-    }
-    #dlModal .dl-list li {
+    .dl-list li {
       display: flex; align-items: center; gap: 8px;
-      padding: 9px 12px; border-radius: 9px; border: 1px solid #e0e0e0;
+      padding: 7px 12px; border-radius: 9px; border: 1px solid #e0e0e0;
       background: #f8f9ff;
     }
-    #dlModal .dl-list li .ext {
+    .dl-list li .ext {
       background: #1a73e8; color: #fff; border-radius: 5px;
       padding: 2px 7px; font-size: 11px; font-weight: 700; min-width: 54px;
       text-align: center; flex-shrink: 0;
     }
-    #dlModal .dl-list li .fname {
+    .dl-list li .fname {
       flex: 1; font-family: monospace; font-size: 12.5px; color: #333;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    #dlModal .dl-list li .actions { display: flex; gap: 6px; flex-shrink: 0; }
-    #dlModal .dl-list li .actions a {
+    .dl-list li .actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .dl-list li .actions a {
       display: inline-flex; align-items: center; gap: 4px;
-      padding: 5px 11px; border-radius: 6px; font-size: 12px; font-weight: 600;
+      padding: 4px 11px; border-radius: 6px; font-size: 12px; font-weight: 600;
       text-decoration: none; border: 1px solid; transition: background 0.15s, color 0.15s;
       white-space: nowrap;
     }
-    #dlModal .dl-list li .actions .btn-dl {
+    .dl-list li .actions .btn-dl {
       background: #1a73e8; color: #fff; border-color: #1a73e8;
     }
-    #dlModal .dl-list li .actions .btn-dl:hover { background: #1558b0; border-color: #1558b0; }
-    #dlModal .dl-list li .actions .btn-open {
+    .dl-list li .actions .btn-dl:hover { background: #1558b0; border-color: #1558b0; }
+    .dl-list li .actions .btn-open {
       background: #fff; color: #1a73e8; border-color: #1a73e8;
     }
-    #dlModal .dl-list li .actions .btn-open:hover { background: #e8f0fe; }
-    #dlClose {
-      position: absolute; top: 12px; right: 14px; background: none;
-      border: none; font-size: 22px; cursor: pointer; color: #999; line-height: 1;
-      padding: 2px 6px; border-radius: 6px;
+    .dl-list li .actions .btn-open:hover { background: #e8f0fe; }
+    .detail-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      gap: 12px;
     }
-    #dlClose:hover { background: #f0f0f0; color: #333; }
+    .detail-cell {
+      height: 260px; border: 1px solid #e8e8e8; border-radius: 8px; padding: 4px;
+    }
+    /* Centered wait overlay dimming the page while detail charts build */
+    #waitOverlay {
+      display: none; position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0, 0, 0, 0.45);
+      align-items: center; justify-content: center;
+    }
+    #waitOverlay.open { display: flex; }
+    #waitOverlay .box {
+      background: #fff; border-radius: 12px; padding: 22px 30px;
+      font-size: 15px; font-weight: 600; color: #1a73e8;
+      box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+    }
+    #waitOverlay .box::before {
+      content: ""; display: inline-block; width: 16px; height: 16px;
+      border: 2px solid #1a73e8; border-top-color: transparent;
+      border-radius: 50%; margin-right: 10px; vertical-align: -3px;
+      animation: dspin 0.8s linear infinite;
+    }
+    @keyframes dspin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -306,7 +317,7 @@ TEMPLATE = r"""<!doctype html>
         selection when the warning appears.
         Tip: double-click a legend entry to isolate one series; double-click
         again to bring the others back.
-        Click a data point to download its log files.
+        Click a data point to show its download links and InnoDB metric graphs under the chart.
         Shareable URL parameters:
         <code>?display=graph|table&amp;metric=tps|lat95&amp;shape=box|violin|circle&amp;points=all|outliers|none&amp;median=lines,bars|none&amp;server=...&amp;mem=2,32&amp;tp=off,80&amp;os=2,3&amp;hide=...</code>
         (each list also accepts <code>all</code>; <code>hide</code> lists series
@@ -318,6 +329,8 @@ TEMPLATE = r"""<!doctype html>
       <div id="warn"></div>
       <div id="chart"></div>
       <div id="tableView" style="display: none;"></div>
+      <div id="detailSection"></div>
+      <div id="waitOverlay"><div class="box" id="waitMsg"></div></div>
     </div>
   </div>
 
@@ -861,18 +874,114 @@ function makeListItem(ext, fname, url) {
   return li;
 }
 
-function showDownloadModal(p) {
+// InnoDB metric charts drawn under the downloads when a node is clicked.
+// rate:true = cumulative counter shown as per-second delta.
+const INNODB_CHARTS = [
+  {title: "Buffer pool read requests", unit: "/s", rate: true,
+   vars: ["buffer_pool_read_requests"]},
+  {title: "Buffer pool reads (from disk)", unit: "/s", rate: true,
+   vars: ["buffer_pool_reads"]},
+  {title: "Buffer pool pages dirty / free", unit: "pages", rate: false,
+   vars: ["buffer_pool_pages_dirty", "buffer_pool_pages_free"]},
+  {title: "Pages read / written", unit: "/s", rate: true,
+   vars: ["buffer_pages_read", "buffer_pages_written"]},
+  {title: "OS data reads / writes", unit: "/s", rate: true,
+   vars: ["os_data_reads", "os_data_writes"]},
+  {title: "Row lock waits", unit: "/s", rate: true, vars: ["lock_row_lock_waits"]},
+  {title: "Row lock time", unit: "ms/s", rate: true, vars: ["lock_row_lock_time"]},
+  {title: "DML operations", unit: "/s", rate: true,
+   vars: ["dml_reads", "dml_inserts", "dml_updates", "dml_deletes"]},
+  {title: "Transactions committed", unit: "/s", rate: true,
+   vars: ["trx_rw_commits", "trx_commits_insert_update"]},
+  {title: "Log writes", unit: "/s", rate: true,
+   vars: ["log_writes", "log_write_requests"]},
+  {title: "Active transactions", unit: "", rate: false,
+   vars: ["trx_active_transactions"]},
+];
+const DETAIL_COLORS = ['#2196F3', '#4CAF50', '#FF9800', '#9C27B0',
+                       '#F44336', '#00BCD4', '#795548', '#607D8B'];
+
+const innodbCache = {};   // fileBase -> {t: [...], v: {name: [...]}}
+let detailToken = 0;
+let detailPlots = [];
+
+function clearDetail() {
+  detailPlots.forEach(div => Plotly.purge(div));
+  detailPlots = [];
+  el("detailSection").innerHTML = "";
+}
+
+function waitShow(text) {
+  el("waitMsg").textContent = text;
+  el("waitOverlay").classList.add("open");
+}
+
+function waitHide() {
+  el("waitOverlay").classList.remove("open");
+}
+
+// Parse the .innodb.txt CSV: "timestamp,<metric>,..." header, one row per
+// second; only the columns used by INNODB_CHARTS are kept
+function parseInnodb(text) {
+  const lines = text.split("\n").filter(l => l.trim());
+  const header = lines[0].split(",");
+  const wanted = new Set(INNODB_CHARTS.flatMap(c => c.vars));
+  const colIdx = {};
+  header.forEach((name, i) => { if (wanted.has(name)) colIdx[name] = i; });
+  const t = [], v = {};
+  Object.keys(colIdx).forEach(name => { v[name] = []; });
+  for (let i = 1; i < lines.length; i++) {
+    const cells = lines[i].split(",");
+    const ts = parseFloat(cells[0]);
+    if (!Number.isFinite(ts)) continue;
+    t.push(ts);
+    for (const name in colIdx) {
+      const x = parseFloat(cells[colIdx[name]]);
+      v[name].push(Number.isFinite(x) ? x : null);
+    }
+  }
+  return { t: t, v: v };
+}
+
+// Cumulative counter -> per-second rate (null on gaps and counter resets)
+function rateSeries(t, vals) {
+  const out = [null];
+  for (let i = 1; i < vals.length; i++) {
+    const dt = t[i] - t[i - 1];
+    if (vals[i] === null || vals[i - 1] === null || dt <= 0 ||
+        vals[i] < vals[i - 1]) {
+      out.push(null);
+    } else {
+      out.push((vals[i] - vals[i - 1]) / dt);
+    }
+  }
+  return out;
+}
+
+async function showDetail(p) {
+  clearDetail();
+  const token = ++detailToken;
+  const section = el("detailSection");
   const path = serverToPath(p.server);
   const tpToken = p.tp === "off" ? "tpoff" : `tp${p.tp}_os${p.os}`;
 
-  document.getElementById('dlTitle').textContent = p.server;
-  document.getElementById('dlSubtitle').textContent =
-    `Rows: ${p.rows}  ·  Buffer pool: ${p.mem_gb}G  ·  Thread pool: ` +
-    `${tpLabel(p.tp, p.os)}  ·  Threads: ${p.threads}  ·  Median TPS: ` +
+  const h = document.createElement("h3");
+  h.textContent = `${p.server} — ${p.mem_gb}G | ${tpLabel(p.tp, p.os)} | ${p.threads} threads`;
+  section.appendChild(h);
+  const sub = document.createElement("div");
+  sub.className = "subtitle";
+  sub.textContent =
+    `Rows: ${p.rows}  ·  Median TPS: ` +
     `${Math.round(median(p.samples)).toLocaleString()}  ·  Median p95: ` +
     `${median(p.lat).toFixed(2)} ms`;
-  const list = document.getElementById('dlLinks');
-  list.innerHTML = '';
+  section.appendChild(sub);
+
+  const dlHead = document.createElement("h4");
+  dlHead.textContent = "Log files";
+  section.appendChild(dlHead);
+  const list = document.createElement("ul");
+  list.className = "dl-list";
+  section.appendChild(list);
 
   // Per-run files for every run of this configuration
   p.runs.forEach(r => {
@@ -882,7 +991,6 @@ function showDownloadModal(p) {
       list.appendChild(makeListItem(ext, fname, `${BASE_URL}/${path}/${fname}`));
     });
   });
-
   // Per-tier files
   TIER_EXTS.forEach(ext => {
     const fname = ext === "pt-mysql-summary.txt"
@@ -894,11 +1002,87 @@ function showDownloadModal(p) {
   list.appendChild(makeListItem("errlog.txt", `Tier${p.mem_gb}G.errlog.txt`,
                                 `${BASE_URL}/${path}/Tier${p.mem_gb}G.errlog.txt`));
 
-  document.getElementById('dlOverlay').classList.add('open');
-}
+  // InnoDB charts from the first run's .innodb.txt
+  const runNo = p.runs[0];
+  const fileBase = `run${runNo}_${p.rows}_Tier${p.mem_gb}G_${tpToken}_RW_${p.threads}th`;
+  const idbHead = document.createElement("h4");
+  idbHead.textContent = `InnoDB metrics over time (run ${runNo})`;
+  section.appendChild(idbHead);
+  // Centered overlay dims the page while the charts are prepared; stale-token
+  // returns below never hide it, since a newer click owns the overlay then
+  waitShow("Please wait, preparing InnoDB graphs ...");
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Let the browser paint the overlay before the heavy work starts
+  await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+  if (token !== detailToken) return;
 
-function closeModal() {
-  document.getElementById('dlOverlay').classList.remove('open');
+  if (!(fileBase in innodbCache)) {
+    waitShow(`Please wait, loading ${fileBase}.innodb.txt ...`);
+    try {
+      const resp = await fetch(`${BASE_URL}/${path}/${fileBase}.innodb.txt`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      innodbCache[fileBase] = parseInnodb(await resp.text());
+    } catch (err) {
+      // another click may have replaced the section while we waited
+      if (token !== detailToken) return;
+      const status = document.createElement("p");
+      status.className = "subtitle";
+      status.textContent = `Could not load ${fileBase}.innodb.txt (${err.message}). ` +
+        `If the report was opened as a local file, serve it over HTTP instead, ` +
+        `e.g. "python3 -m http.server" in the report directory.`;
+      section.appendChild(status);
+      waitHide();
+      return;
+    }
+    if (token !== detailToken) return;
+  }
+  waitShow("Please wait, building InnoDB graphs ...");
+
+  const sample = innodbCache[fileBase];
+  const t0 = sample.t[0];
+  const minutes = sample.t.map(ts => (ts - t0) / 60);
+  const grid = document.createElement("div");
+  grid.className = "detail-grid";
+  section.appendChild(grid);
+
+  // Charts are built one per animation frame so the wait message stays
+  // painted and the page remains responsive; a newer click aborts the loop
+  for (const spec of INNODB_CHARTS) {
+    if (token !== detailToken) return;
+    const vars = spec.vars.filter(name => sample.v[name]);
+    if (!vars.length) continue;
+    const cell = document.createElement("div");
+    cell.className = "detail-cell";
+    grid.appendChild(cell);
+
+    const traces = vars.map((name, i) => ({
+      type: "scatter",
+      mode: "lines",
+      name: name,
+      x: minutes,
+      y: spec.rate ? rateSeries(sample.t, sample.v[name]) : sample.v[name],
+      line: { width: 1.5, color: DETAIL_COLORS[i % DETAIL_COLORS.length] },
+      connectgaps: false,
+      hovertemplate: `${name}: %{y:,.1f} ${spec.unit}<extra></extra>`,
+    }));
+    Plotly.newPlot(cell, traces, {
+      title: { text: spec.title + (spec.unit ? ` (${spec.unit})` : ""),
+               font: { size: 12 } },
+      margin: { l: 55, r: 10, t: 34, b: 34 },
+      showlegend: vars.length > 1,
+      legend: { orientation: "h", y: -0.25, font: { size: 9 } },
+      xaxis: { title: { text: "minutes", font: { size: 10 } },
+               tickfont: { size: 9 } },
+      yaxis: { rangemode: "tozero", tickfont: { size: 9 } },
+      hovermode: "x unified",
+    }, { displayModeBar: false, responsive: true });
+    detailPlots.push(cell);
+    await new Promise(r => setTimeout(r, 0));
+  }
+  if (token !== detailToken) return;
+  waitHide();
+  // Bring the freshly built InnoDB graphs to the top of the screen
+  idbHead.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // Click on a data point (or box/violin) opens the download modal
@@ -915,7 +1099,7 @@ function attachClick(series, distStart, cats) {
     const cd = ev.points[0].customdata;
     const threads = cd ? cd[3] : Number(cats[Math.round(ev.points[0].x)]);
     const p = s.pts.find(pt => pt.threads === threads);
-    if (p) showDownloadModal(p);
+    if (p) showDetail(p);
   });
 }
 
@@ -1015,26 +1199,6 @@ function init() {
 }
 
 window.addEventListener('load', function() { loadPlotly(init); });
-</script>
-
-<!-- Download modal -->
-<div id="dlOverlay">
-  <div id="dlModal">
-    <button id="dlClose" title="Close">&#x2715;</button>
-    <h3 id="dlTitle">Download log files</h3>
-    <div id="dlSubtitle" class="subtitle"></div>
-    <ul id="dlLinks" class="dl-list"></ul>
-  </div>
-</div>
-
-<script>
-document.getElementById('dlClose').addEventListener('click', closeModal);
-document.getElementById('dlOverlay').addEventListener('click', function(e) {
-  if (e.target === this) closeModal();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closeModal();
-});
 </script>
 </body>
 </html>
