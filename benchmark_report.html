@@ -35,6 +35,10 @@
     button { padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #eee; }
     #chart { height: 780px; }
+    /* Plotly marks legend entries of hidden (legendonly) traces with an
+       inline opacity of 0.5; fade them further so the disabled state is
+       clearly visible */
+    #chart .legend g.traces[style*="opacity: 0.5"] { opacity: 0.2 !important; }
     #tableView { max-height: 780px; overflow: auto; }
     #tableView table { border-collapse: collapse; width: 100%; font-family: monospace; font-size: 13px; }
     #tableView th, #tableView td { border: 1px solid #ccc; padding: 5px 10px; text-align: right; white-space: nowrap; }
