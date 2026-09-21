@@ -1,0 +1,92 @@
+[mysqld]
+port                            = 3306
+socket                          = /tmp/mysql_benchmark.sock
+datadir                         = /home/bogdan.degtyariov/servers/data/mysql_9.7.2_tier12G
+log_error_verbosity             = 3
+log_error                       = /home/bogdan.degtyariov/servers/data/mysql_9.7.2_tier12G/mysql-error.log
+# --- General -------------------------------------------------------------------
+user                            = bogdan.degtyariov
+bind-address                    = 0.0.0.0
+skip-name-resolve               = ON
+
+# --- Connection & Threading ----------------------------------------------------
+max_connections                 = 20000
+max_connect_errors              = 1000000
+max_prepared_stmt_count         = 10000000
+thread_stack                    = 512K
+thread_cache_size               = 10000
+back_log                        = 16384
+wait_timeout                    = 300
+interactive_timeout             = 300
+connect_timeout                 = 60
+
+# --- Thread Pool (MySQL 9.7.2+ plugin) --------------------------------------
+#thread_handling                = pool-of-threads   # Percona Server only
+plugin-load-add                 = thread_pool.so
+thread_pool_size                = 80
+thread_pool_max_active_query_threads = 12000       # ~ Percona thread_pool_max_threads
+thread_pool_query_threads_per_group  = 3  # ~ Percona thread_pool_oversubscribe=2
+
+# --- InnoDB - Buffer pool Tier -------------------------------------------------
+innodb_buffer_pool_size         = 12G
+innodb_buffer_pool_load_at_startup  = OFF
+innodb_buffer_pool_dump_at_shutdown = OFF
+
+# --- InnoDB – I/O (NVMe can saturate many threads) ----------------------------
+innodb_io_capacity              = 10000
+innodb_io_capacity_max          = 20000
+innodb_read_io_threads          = 16
+innodb_write_io_threads         = 16
+innodb_use_native_aio           = ON
+
+# --- InnoDB – Log / Durability -------------------------------------------------
+innodb_log_buffer_size          = 256M
+innodb_flush_log_at_trx_commit  = 1          # full ACID; use 2 for ~10 % more speed
+innodb_doublewrite              = ON
+
+# --- InnoDB – Concurrency & OLTP Tuning ---------------------------------------
+innodb_stats_on_metadata        = OFF
+innodb_open_files               = 65536
+innodb_lock_wait_timeout        = 50
+innodb_rollback_on_timeout      = ON
+
+# --- Per-Session Buffers (keep modest; many connections × this = RAM) ----------
+sort_buffer_size                = 4M
+join_buffer_size                = 4M
+read_buffer_size                = 2M
+read_rnd_buffer_size            = 4M
+tmp_table_size                  = 256M
+max_heap_table_size             = 256M
+
+# --- Table & File Handles ------------------------------------------------------
+table_open_cache                = 65536
+table_definition_cache          = 65536
+open_files_limit                = 1000000
+table_open_cache_instances      = 64
+
+# --- Binary Log ----------------------------------------------------------------
+# Binary logging DISABLED for benchmarking
+disable_log_bin                 = ON
+
+# --- Slow Query Log ------------------------------------------------------------
+slow_query_log                  = ON
+slow_query_log_file             = /home/bogdan.degtyariov/servers/data/mysql_9.7.2_tier12G/slow.log
+long_query_time                 = 1
+log_queries_not_using_indexes   = OFF
+min_examined_row_limit          = 1000
+
+# --- Character Set -------------------------------------------------------------
+character_set_server            = utf8mb4
+collation_server                = utf8mb4_unicode_ci
+
+# --- Misc ----------------------------------------------------------------------
+max_allowed_packet              = 64M
+bulk_insert_buffer_size         = 256M
+myisam_sort_buffer_size         = 128M
+key_buffer_size                 = 64M        # MyISAM only; keep small for OLTP
+
+# --- Version specific settings -------------------------------------------------
+innodb_redo_log_capacity = 4G
+innodb_change_buffering = none
+innodb_flush_method = O_DIRECT
+innodb_buffer_pool_instances    = 2
