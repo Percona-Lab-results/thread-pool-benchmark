@@ -901,7 +901,23 @@ const INNODB_CHARTS = [
 const DETAIL_COLORS = ['#2196F3', '#4CAF50', '#FF9800', '#9C27B0',
                        '#F44336', '#00BCD4', '#795548', '#607D8B'];
 
+// Thread pool status charts (Percona Server), drawn before the InnoDB ones;
+// all values are per-snapshot gauges from SHOW GLOBAL STATUS
+const THPOOL_CHARTS = [
+  {title: "Thread pool threads", unit: "", rate: false,
+   vars: ["Threadpool_threads", "Threadpool_idle_threads"]},
+  {title: "Requests waiting in queue", unit: "", rate: false,
+   vars: ["Threadpool_requests_waiting_in_queue",
+          "Threadpool_requests_waiting_in_hp_queue"]},
+  {title: "Requests starved in queue", unit: "", rate: false,
+   vars: ["Threadpool_requests_starved_in_queue"]},
+  {title: "Average queue wait", unit: "µs", rate: false,
+   vars: ["Threadpool_average_queue_wait_us",
+          "Threadpool_average_hp_queue_wait_us"]},
+];
+
 const innodbCache = {};   // fileBase -> {t: [...], v: {name: [...]}}
+const thpoolCache = {};   // fileBase -> {t: [...], v: {name: [...]}}
 let detailToken = 0;
 let detailPlots = [];
 
@@ -939,6 +955,25 @@ function parseInnodb(text) {
       const x = parseFloat(cells[colIdx[name]]);
       v[name].push(Number.isFinite(x) ? x : null);
     }
+  }
+  return { t: t, v: v };
+}
+
+// Parse the .stat-thpool.txt snapshots: "TS<TAB>Variable_name<TAB>Value" lines,
+// one block of Threadpool_% variables per second. Composite values like
+// "avg: 18131.641, min: ..." contribute their avg component.
+function parseThpool(text) {
+  const t = [], v = {};
+  let cur = null;
+  for (const line of text.split("\n")) {
+    const parts = line.split("\t");
+    if (parts.length < 3) continue;
+    const ts = parseFloat(parts[0]);
+    if (!Number.isFinite(ts)) continue;
+    const m = parts[2].match(/avg:\s*([0-9.]+)/);
+    const val = parseFloat(m ? m[1] : parts[2]);
+    if (ts !== cur) { cur = ts; t.push(ts); }
+    (v[parts[1]] = v[parts[1]] || []).push(Number.isFinite(val) ? val : null);
   }
   return { t: t, v: v };
 }
@@ -1002,19 +1037,68 @@ async function showDetail(p) {
   list.appendChild(makeListItem("errlog.txt", `Tier${p.mem_gb}G.errlog.txt`,
                                 `${BASE_URL}/${path}/Tier${p.mem_gb}G.errlog.txt`));
 
-  // InnoDB charts from the first run's .innodb.txt
   const runNo = p.runs[0];
   const fileBase = `run${runNo}_${p.rows}_Tier${p.mem_gb}G_${tpToken}_RW_${p.threads}th`;
-  const idbHead = document.createElement("h4");
-  idbHead.textContent = `InnoDB metrics over time (run ${runNo})`;
-  section.appendChild(idbHead);
+  let scrollTarget = null;
+
   // Centered overlay dims the page while the charts are prepared; stale-token
   // returns below never hide it, since a newer click owns the overlay then
-  waitShow("Please wait, preparing InnoDB graphs ...");
+  waitShow("Please wait, preparing graphs ...");
   section.scrollIntoView({ behavior: "smooth", block: "start" });
   // Let the browser paint the overlay before the heavy work starts
   await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
   if (token !== detailToken) return;
+
+  function loadError(fname, err) {
+    const status = document.createElement("p");
+    status.className = "subtitle";
+    status.textContent = `Could not load ${fname} (${err.message}). ` +
+      `If the report was opened as a local file, serve it over HTTP instead, ` +
+      `e.g. "python3 -m http.server" in the report directory.`;
+    section.appendChild(status);
+  }
+
+  // Thread pool status charts (Percona Server) come before the InnoDB ones
+  if (p.server.startsWith("Percona")) {
+    const tpHead = document.createElement("h4");
+    tpHead.textContent = `Thread pool status over time (run ${runNo})`;
+    section.appendChild(tpHead);
+    scrollTarget = tpHead;
+
+    const tpFile = `${fileBase}.stat-thpool.txt`;
+    let tpSample = thpoolCache[fileBase];
+    if (tpSample === undefined) {
+      waitShow(`Please wait, loading ${tpFile} ...`);
+      try {
+        const resp = await fetch(`${BASE_URL}/${path}/${tpFile}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        tpSample = thpoolCache[fileBase] = parseThpool(await resp.text());
+      } catch (err) {
+        // another click may have replaced the section while we waited
+        if (token !== detailToken) return;
+        loadError(tpFile, err);
+        waitHide();
+        return;
+      }
+      if (token !== detailToken) return;
+    }
+    if (tpSample.t.length) {
+      waitShow("Please wait, building thread pool graphs ...");
+      if (!await buildChartGrid(section, THPOOL_CHARTS, tpSample, token)) return;
+    } else {
+      const note = document.createElement("p");
+      note.className = "subtitle";
+      note.textContent = "No thread pool status snapshots for this run " +
+        "(thread pool disabled?).";
+      section.appendChild(note);
+    }
+  }
+
+  // InnoDB charts from the first run's .innodb.txt
+  const idbHead = document.createElement("h4");
+  idbHead.textContent = `InnoDB metrics over time (run ${runNo})`;
+  section.appendChild(idbHead);
+  if (!scrollTarget) scrollTarget = idbHead;
 
   if (!(fileBase in innodbCache)) {
     waitShow(`Please wait, loading ${fileBase}.innodb.txt ...`);
@@ -1025,30 +1109,32 @@ async function showDetail(p) {
     } catch (err) {
       // another click may have replaced the section while we waited
       if (token !== detailToken) return;
-      const status = document.createElement("p");
-      status.className = "subtitle";
-      status.textContent = `Could not load ${fileBase}.innodb.txt (${err.message}). ` +
-        `If the report was opened as a local file, serve it over HTTP instead, ` +
-        `e.g. "python3 -m http.server" in the report directory.`;
-      section.appendChild(status);
+      loadError(`${fileBase}.innodb.txt`, err);
       waitHide();
       return;
     }
     if (token !== detailToken) return;
   }
   waitShow("Please wait, building InnoDB graphs ...");
+  if (!await buildChartGrid(section, INNODB_CHARTS, innodbCache[fileBase], token)) return;
 
-  const sample = innodbCache[fileBase];
+  waitHide();
+  // Bring the freshly built graphs to the top of the screen
+  scrollTarget.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// One grid of small line charts; built one chart per tick so the wait
+// message stays painted and the page remains responsive. Returns false
+// when a newer click aborted the build.
+async function buildChartGrid(section, specs, sample, token) {
   const t0 = sample.t[0];
   const minutes = sample.t.map(ts => (ts - t0) / 60);
   const grid = document.createElement("div");
   grid.className = "detail-grid";
   section.appendChild(grid);
 
-  // Charts are built one per animation frame so the wait message stays
-  // painted and the page remains responsive; a newer click aborts the loop
-  for (const spec of INNODB_CHARTS) {
-    if (token !== detailToken) return;
+  for (const spec of specs) {
+    if (token !== detailToken) return false;
     const vars = spec.vars.filter(name => sample.v[name]);
     if (!vars.length) continue;
     const cell = document.createElement("div");
@@ -1079,10 +1165,7 @@ async function showDetail(p) {
     detailPlots.push(cell);
     await new Promise(r => setTimeout(r, 0));
   }
-  if (token !== detailToken) return;
-  waitHide();
-  // Bring the freshly built InnoDB graphs to the top of the screen
-  idbHead.scrollIntoView({ behavior: "smooth", block: "start" });
+  return token === detailToken;
 }
 
 // Click on a data point (or box/violin) opens the download modal
